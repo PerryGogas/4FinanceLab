@@ -2,6 +2,7 @@
   "name": "4Finance Lab - Financial Analysis Suite",
   "short_name": "4Finance Lab",
   "description": "Interactive financial analysis tools with step-by-step formulas, interactive charts and Excel/PNG export. By Prof. Periklis Gogas.",
+  "id": "./",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
