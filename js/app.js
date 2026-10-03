@@ -461,4 +461,38 @@
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
     window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
   }
+
+  // ---------------- Install app button ----------------
+  (function installButton() {
+    const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+    if (standalone || !location.protocol.startsWith('http')) return;
+    let deferred = null;
+    const btn = document.createElement('button');
+    btn.className = 'btn primary'; btn.id = 'installBtn'; btn.title = 'Install 4Finance Lab as an app';
+    btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/></svg><span class="lbl">Install app</span>';
+    $('#themeBtn').before(btn);
+    window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferred = e; });
+    window.addEventListener('appinstalled', () => { btn.remove(); toast('4Finance Lab installed'); });
+    function help() {
+      const ua = navigator.userAgent, ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && 'ontouchend' in document);
+      const edge = /Edg\//.test(ua), android = /Android/.test(ua), firefox = /Firefox/.test(ua), safari = /Safari/.test(ua) && !/Chrome|Chromium|Edg/.test(ua);
+      const steps = ios ? 'Tap the <b>Share</b> button, then <b>Add to Home Screen</b>.'
+        : safari ? 'In Safari choose <b>File &gt; Add to Dock</b>.'
+        : firefox ? 'Firefox on desktop cannot install web apps. Please open this page in <b>Chrome</b> or <b>Edge</b>.'
+        : android ? 'Open the browser menu <b>&#8942;</b> and tap <b>Install app</b> or <b>Add to Home screen</b>.'
+        : edge ? 'Open the menu <b>&#8943;</b> &gt; <b>Apps</b> &gt; <b>Install this site as an app</b>.'
+        : 'Open the menu <b>&#8942;</b> &gt; <b>Cast, save, and share</b> &gt; <b>Install page as app</b>, or click the install icon at the right end of the address bar.';
+      const d = document.createElement('div');
+      d.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;display:grid;place-items:center;padding:16px';
+      d.innerHTML = `<div class="panel" style="max-width:420px;padding:22px"><h3 style="margin:0 0 8px">Install 4Finance Lab</h3><p style="margin:0 0 16px;color:var(--muted)">${steps}</p><button class="btn primary" style="width:100%;justify-content:center">OK</button></div>`;
+      d.addEventListener('click', e => { if (e.target === d || e.target.tagName === 'BUTTON') d.remove(); });
+      document.body.appendChild(d);
+    }
+    btn.addEventListener('click', async () => {
+      if (!deferred) return help();
+      deferred.prompt();
+      const r = await deferred.userChoice; deferred = null;
+      if (r.outcome === 'accepted') btn.remove();
+    });
+  })();
 })();
