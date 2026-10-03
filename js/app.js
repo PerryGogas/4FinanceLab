@@ -470,8 +470,9 @@
     const btn = document.createElement('button');
     btn.className = 'btn primary'; btn.id = 'installBtn'; btn.title = 'Install 4Finance Lab as an app';
     btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/></svg><span class="lbl">Install app</span>';
+    btn.style.display = 'none';
     $('#themeBtn').before(btn);
-    window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferred = e; });
+    window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferred = e; btn.style.display = ''; });
     window.addEventListener('appinstalled', () => { btn.remove(); toast('4Finance Lab installed'); });
     function help() {
       const ua = navigator.userAgent, ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && 'ontouchend' in document);
