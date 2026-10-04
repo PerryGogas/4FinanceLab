@@ -1,5 +1,5 @@
 /* 4Finance Lab service worker: offline cache. Bump VERSION on every release. */
-const VERSION = '4fl-v2.0.2';
+const VERSION = '4fl-v2.1.0';
 const ASSETS = [
   './', './index.html', './manifest.webmanifest',
   './css/styles.css', './js/math.js', './js/tools.js', './js/app.js',
