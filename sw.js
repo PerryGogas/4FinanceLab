@@ -1,8 +1,8 @@
 /* 4Finance Lab service worker: offline cache. Bump VERSION on every release. */
-const VERSION = '4fl-v2.2.0';
+const VERSION = '4fl-v2.3.0';
 const ASSETS = [
   './', './index.html', './manifest.webmanifest',
-  './css/styles.css', './js/math.js', './js/tools.js', './js/app.js',
+  './css/styles.css', './js/config.js', './js/math.js', './data/companies.json', './js/tools.js', './js/app.js',
   './lib/chart.umd.min.js', './lib/xlsx.mini.min.js',
   './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png',
   './icons/apple-touch-icon.png', './icons/favicon-32.png'
