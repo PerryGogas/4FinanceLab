@@ -170,6 +170,8 @@ a { color: var(--accent); }
 .seg button.on { background: var(--surface); color: var(--accent); box-shadow: 0 1px 3px rgba(0,0,0,.12); }
 .reset-link { background: none; border: 0; color: var(--muted); cursor: pointer; font-size: .78rem; text-decoration: underline; padding: 0; }
 .file-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.co-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px; }
+.co-row select { width: auto; }
 .file-btn { cursor: pointer; }
 .file-status { font-size: .78rem; color: var(--muted); margin-top: 6px; }
 
