@@ -172,6 +172,9 @@ a { color: var(--accent); }
 .file-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .co-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px; }
 .co-row select { width: auto; }
+.colpick { display: flex; flex-wrap: wrap; gap: 6px; max-height: 190px; overflow: auto; padding: 6px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-2); }
+.field .colpick label.chk { display: inline-flex; align-items: center; gap: 6px; margin: 0; padding: 4px 9px; border-radius: 7px; background: var(--surface-3); color: var(--text); font-weight: 500; cursor: pointer; }
+.field .colpick input[type=checkbox] { width: auto; padding: 0; margin: 0; box-shadow: none; accent-color: var(--accent); }
 .file-btn { cursor: pointer; }
 .file-status { font-size: .78rem; color: var(--muted); margin-top: 6px; }
 
