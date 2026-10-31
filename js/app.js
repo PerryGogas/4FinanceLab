@@ -158,7 +158,9 @@
   }
 
   // ---------------- Tool view ----------------
-  function defaults(t) { const v = {}; t.inputs.forEach(i => v[i.id] = i.value); return v; }
+  function defaults(t) { const v = {}; t.inputs.forEach(i => { if (i.type !== 'file') v[i.id] = i.value; }); return v; }
+  const files = {};   // uploaded files per tool (kept in memory only)
+  const fileOf = (tid, iid) => (files[tid] || {})[iid];
 
   function openTool(t) {
     current = t; markNav(t.id);
@@ -202,6 +204,11 @@
       if (i.type === 'select') ctl = `<select id="in_${i.id}">${i.options.map(o => `<option value="${esc(o[0])}" ${String(o[0]) === String(val) ? 'selected' : ''}>${esc(o[1])}</option>`).join('')}</select>`;
       else if (i.type === 'seg') ctl = `<div class="seg" id="in_${i.id}">${i.options.map(o => `<button type="button" data-v="${esc(o[0])}" class="${String(o[0]) === String(val) ? 'on' : ''}">${esc(o[1])}</button>`).join('')}</div>`;
       else if (i.type === 'textarea') ctl = `<textarea id="in_${i.id}" spellcheck="false">${esc(val ?? '')}</textarea>`;
+      else if (i.type === 'file') {
+        const f = fileOf(t.id, i.id);
+        ctl = `<div class="file-row"><label class="btn file-btn">${svg('xlsx')}<span>${f ? 'Replace file' : 'Choose file'}</span><input id="in_${i.id}" type="file" accept="${esc(i.accept || '')}" hidden></label>${i.template ? `<button type="button" class="btn" id="tpl_${i.id}">Template</button>` : ''}</div>
+          <div class="file-status">${f ? `<b>${esc(f.name)}</b> &middot; ${f.rows.length} rows <button type="button" class="reset-link" id="fx_${i.id}">remove</button>` : 'No file loaded'}</div>`;
+      }
       else ctl = `<input id="in_${i.id}" type="number" inputmode="decimal" step="${i.step ?? 'any'}" ${i.min !== undefined ? `min="${i.min}"` : ''} ${i.max !== undefined ? `max="${i.max}"` : ''} value="${val ?? ''}">`;
       h += `<div class="field" data-f="${i.id}">${lab}${ctl}${i.hint ? `<div class="hint">${i.hint}</div>` : ''}</div>`;
     });
@@ -209,6 +216,27 @@
     $('#inputs').innerHTML = h;
     t.inputs.forEach(i => {
       const el = $('#in_' + i.id);
+      if (i.type === 'file') {
+        el.addEventListener('change', async () => {
+          const f = el.files[0]; if (!f) return;
+          try {
+            let wb;
+            if (/\.csv$/i.test(f.name)) {
+              const txt = await f.text(); const first = txt.split(/\r?\n/)[0] || '';
+              wb = XLSX.read(txt, { type: 'string', FS: (first.split(';').length > first.split(',').length) ? ';' : ',' });
+            } else wb = XLSX.read(await f.arrayBuffer(), { type: 'array' });
+            const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
+            (files[t.id] = files[t.id] || {})[i.id] = { name: f.name, rows };
+            toast(rows.length + ' rows loaded');
+          } catch (err) { toast('Could not read this file'); console.error(err); }
+          renderInputs(); recompute();
+        });
+        const tb = $('#tpl_' + i.id);
+        if (tb) tb.addEventListener('click', () => { const tp = i.template; const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([tp.columns].concat(tp.rows)), 'Data'); XLSX.writeFile(wb, tp.name); toast('Template downloaded'); });
+        const fx = $('#fx_' + i.id);
+        if (fx) fx.addEventListener('click', () => { delete (files[t.id] || {})[i.id]; renderInputs(); recompute(); });
+        return;
+      }
       if (i.type === 'seg') el.addEventListener('click', e => {
         const b = e.target.closest('button'); if (!b) return;
         el.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
@@ -248,6 +276,7 @@
     const v = {};
     current.inputs.forEach(i => {
       const raw = values[i.id];
+      if (i.type === 'file') { const f = fileOf(current.id, i.id); v[i.id] = f ? f.rows : null; return; }
       v[i.id] = (i.type === 'select' || i.type === 'seg' || i.type === 'textarea') ? raw : (raw === '' || raw === null || raw === undefined ? NaN : parseFloat(raw));
     });
     return v;
@@ -361,6 +390,7 @@
     const rows = [['Input', 'Value', 'Unit']];
     current.inputs.forEach(i => {
       if (i.showIf && !i.showIf(v)) return;
+      if (i.type === 'file') { const f = fileOf(current.id, i.id); if (f) rows.push([stripTags(i.label), f.name + ' (' + f.rows.length + ' rows)', '']); return; }
       let val = values[i.id];
       if (i.type === 'select' || i.type === 'seg') { const o = i.options.find(o => String(o[0]) === String(val)); val = o ? o[1] : val; }
       else if (i.type !== 'textarea') { val = lastResult.solved && i.id in lastResult.solved ? lastResult.solved[i.id] : parseFloat(val); }

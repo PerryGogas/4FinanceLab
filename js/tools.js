@@ -71,26 +71,88 @@
   const TOOLS = [];
 
   /* =====================================================================
-     1. ALTMAN Z-SCORE
+     1. ALTMAN Z-SCORE (Z, Z', Z'', EM score, bond-rating equivalent, PD, batch)
      ===================================================================== */
   const ALT = {
-    public: { name: 'Z-Score (public manufacturing)', sym: 'Z', c: [1.2, 1.4, 3.3, 0.6, 1.0], lo: 1.81, hi: 2.99, eq: 'Market value of equity' },
-    private: { name: "Z'-Score (private manufacturing)", sym: "Z'", c: [0.717, 0.847, 3.107, 0.420, 0.998], lo: 1.23, hi: 2.90, eq: 'Book value of equity' },
-    non_mfg: { name: "Z''-Score (non-manufacturing / services)", sym: "Z''", c: [6.56, 3.26, 6.72, 1.05], lo: 1.10, hi: 2.60, eq: 'Book value of equity' }
+    public: { name: 'Z-Score (public manufacturing)', sym: 'Z', c: [1.2, 1.4, 3.3, 0.6, 1.0], k: 0, lo: 1.81, hi: 2.99, eq: 'Market value of equity' },
+    private: { name: "Z'-Score (private manufacturing)", sym: "Z'", c: [0.717, 0.847, 3.107, 0.420, 0.998], k: 0, lo: 1.23, hi: 2.90, eq: 'Book value of equity' },
+    non_mfg: { name: "Z''-Score (non-manufacturing / services)", sym: "Z''", c: [6.56, 3.26, 6.72, 1.05], k: 0, lo: 1.10, hi: 2.60, eq: 'Book value of equity' },
+    em: { name: "EM score (Z'' + 3.25, emerging markets)", sym: 'EM', c: [6.56, 3.26, 6.72, 1.05], k: 3.25, lo: 4.35, hi: 5.85, eq: 'Book value of equity' }
   };
+  // Median Z''-scores (with the 3.25 constant) of US firms by S&P rating. Source: Altman, "50 Years of Altman Z-Score" (slide: US Bond Rating Equivalents Based on Z''-Score Model); data Compustat, company filings and S&P.
+  const BRE_RATINGS = ['AAA/AA+', 'AA/AA-', 'A+', 'A', 'A-', 'BBB+', 'BBB', 'BBB-', 'BB+', 'BB', 'BB-', 'B+', 'B', 'B-', 'CCC+', 'CCC', 'CCC-', 'CC/D'];
+  const BRE_MED = {
+    1996: [8.15, 7.16, 6.85, 6.65, 6.40, 6.25, 5.85, 5.65, 5.25, 4.95, 4.75, 4.50, 4.15, 3.75, 3.20, 2.50, 1.75, 0],
+    2006: [7.51, 7.78, 7.76, 7.53, 7.10, 6.47, 6.41, 6.36, 6.25, 6.17, 5.65, 5.05, 4.29, 3.68, 2.98, 2.20, 1.62, 0.84],
+    2013: [8.80, 8.40, 8.22, 6.94, 6.12, 5.80, 5.75, 5.70, 5.65, 5.52, 5.07, 4.81, 4.03, 3.74, 2.84, 2.57, 1.72, 0.05]
+  };
+  // S&P Global Ratings, 2023 Annual Global Corporate Default And Rating Transition Study, Table 9: average one-year default rates 1981-2023 (%).
+  // Grouped ratings use the average of their members; CCC+/CCC/CCC- use the CCC/C rate; CC/D is in or at default.
+  const BRE_PD = [0.00, 0.015, 0.04, 0.04, 0.06, 0.11, 0.20, 0.22, 0.45, 0.65, 1.12, 1.99, 5.35, 8.20, 24.45, 24.45, 24.45, null];
+  function breOf(em, year) {
+    const med = BRE_MED[year] || BRE_MED[1996];
+    let best = 0;
+    if (em < med[0]) { let d = Infinity; med.forEach((m, i) => { const di = Math.abs(em - m); if (di < d) { d = di; best = i; } }); }
+    return { i: best, rating: BRE_RATINGS[best], median: med[best], pd: BRE_PD[best] };
+  }
+  const pdTxt = p => p === null ? 'at/near default' : p === 0 ? '< 0.01%' : num(p, p < 0.1 ? 3 : 2) + '%';
+  function altmanAll(d) {
+    // d: {ta, tl, wc, re, ebit, mve, bve, sales}; returns every model's score
+    const X1 = d.wc / d.ta, X2 = d.re / d.ta, X3 = d.ebit / d.ta, X5 = d.sales / d.ta;
+    const mX4 = d.mve / d.tl, bX4 = d.bve / d.tl;
+    const out = { X1, X2, X3, mX4, bX4, X5 };
+    out.Z = 1.2 * X1 + 1.4 * X2 + 3.3 * X3 + 0.6 * mX4 + 1.0 * X5;
+    out.Zp = 0.717 * X1 + 0.847 * X2 + 3.107 * X3 + 0.420 * bX4 + 0.998 * X5;
+    out.Zpp = 6.56 * X1 + 3.26 * X2 + 6.72 * X3 + 1.05 * bX4;
+    out.EM = out.Zpp + 3.25;
+    return out;
+  }
+  const zoneOf = (s, m) => !isFinite(s) ? '' : s > m.hi ? 'Safe' : s < m.lo ? 'Distress' : 'Grey';
+  // flexible column matching for uploaded files
+  const BATCH_COLS = {
+    firm: ['firm', 'company', 'name', 'firmname'], year: ['year', 'period', 'fiscalyear'],
+    ta: ['totalassets', 'ta', 'assets'], tl: ['totalliabilities', 'tl', 'liabilities'],
+    wc: ['workingcapital', 'wc'], ca: ['currentassets', 'ca'], cl: ['currentliabilities', 'cl'],
+    re: ['retainedearnings', 're'], ebit: ['ebit', 'operatingincome'],
+    mve: ['marketvalueofequity', 'marketequity', 'mve', 'marketcap', 'marketcapitalization'],
+    bve: ['bookvalueofequity', 'bookequity', 'bve', 'equity', 'totalequity', 'shareholdersequity'],
+    sales: ['sales', 'revenue', 'revenues', 'totalrevenue', 'turnover']
+  };
+  function batchRows(raw) {
+    if (!Array.isArray(raw) || !raw.length) return [];
+    const keys = Object.keys(raw[0]); const map = {};
+    const norm = s => String(s).toLowerCase().replace(/[^a-z]/g, '');
+    Object.entries(BATCH_COLS).forEach(([k, al]) => { const hit = keys.find(h => al.includes(norm(h))); if (hit) map[k] = hit; });
+    const n = x => { if (x === undefined || x === null || x === '') return NaN; return typeof x === 'number' ? x : parseFloat(String(x).replace(/[\s,$€]/g, '')); };
+    return raw.map((r, idx) => {
+      const g = k => map[k] ? n(r[map[k]]) : NaN;
+      let wc = g('wc'); if (!isFinite(wc)) wc = g('ca') - g('cl');
+      let mve = g('mve'), bve = g('bve');
+      const notes = [];
+      if (!isFinite(bve) && isFinite(mve)) { bve = mve; notes.push('book equity missing: market value used'); }
+      if (!isFinite(mve) && isFinite(bve)) { mve = bve; notes.push('market equity missing: book value used'); }
+      return { firm: map.firm ? String(r[map.firm]) : 'Row ' + (idx + 1), year: map.year ? r[map.year] : '', ta: g('ta'), tl: g('tl'), wc, re: g('re'), ebit: g('ebit'), mve, bve, sales: g('sales'), notes };
+    });
+  }
   TOOLS.push({
     id: 'altman', cat: 'distress', icon: 'gauge', title: 'Altman Z-Score Analyzer', short: 'Altman Z-Score',
-    desc: 'Public (Z), private (Z\') and non-manufacturing (Z\'\') models with zone classification.',
-    long: 'Altman\'s discriminant models for corporate distress: the original Z for public manufacturers (1968), Z\' for private firms and Z\'\' for non-manufacturing and service firms.',
+    desc: 'Z, Z\', Z\'\' and EM score with zones, bond-rating equivalent, default probability and Excel/CSV batch upload.',
+    long: 'Altman\'s distress models: the original Z for public manufacturers (1968), Z\' for private firms, Z\'\' for non-manufacturing firms and the EM score (Z\'\' + 3.25). Every firm also gets Altman\'s bond-rating equivalent and the historical one-year default rate of that rating. Upload an Excel or CSV file to score many firms or years at once.',
     inputs: [
-      { id: 'model', label: 'Model', type: 'seg', value: 'public', options: [['public', 'Z public'], ['private', "Z' private"], ['non_mfg', "Z'' non-mfg"]] },
+      { id: 'model', label: 'Model', type: 'seg', value: 'public', options: [['public', 'Z public'], ['private', "Z' private"], ['non_mfg', "Z'' non-mfg"], ['em', 'EM score']] },
       { id: 'ta', label: 'Total assets', unit: '$', value: 1000000 },
       { id: 'tl', label: 'Total liabilities', unit: '$', value: 600000 },
       { id: 'wc', label: 'Working capital', unit: '$', value: 200000, hint: 'Current assets minus current liabilities' },
       { id: 're', label: 'Retained earnings', unit: '$', value: 300000 },
       { id: 'ebit', label: 'EBIT', unit: '$', value: 150000 },
-      { id: 'eq', label: 'Equity value', unit: '$', value: 1200000, hint: 'Market value of equity for Z; book value of equity for Z\' and Z\'\'' },
-      { id: 'sales', label: 'Sales (revenue)', unit: '$', value: 1800000, showIf: v => v.model !== 'non_mfg' }
+      { id: 'eq', label: 'Equity value', unit: '$', value: 1200000, hint: 'Market value of equity for Z; book value of equity for Z\', Z\'\' and EM' },
+      { id: 'beq', label: 'Book value of equity', unit: '$ (optional)', value: '', optional: true, showIf: v => v.model === 'public', hint: 'Used for the rating equivalent and default probability, which Altman bases on book equity. Leave empty to use the market value above.' },
+      { id: 'sales', label: 'Sales (revenue)', unit: '$', value: 1800000, showIf: v => v.model === 'public' || v.model === 'private' },
+      { id: 'breYear', label: 'Rating calibration', type: 'select', value: '1996', options: [['1996', 'Altman 1996 medians (classic)'], ['2006', 'Altman 2006 medians'], ['2013', 'Altman 2013 medians (latest)']] },
+      { id: 'batch', label: 'Batch: upload Excel or CSV', type: 'file', optional: true, accept: '.xlsx,.xls,.csv',
+        hint: 'One row per firm or year. Download the template for the column names.',
+        template: { name: '4FinanceLab_Altman_template.xlsx', columns: ['Firm', 'Year', 'Total Assets', 'Total Liabilities', 'Working Capital', 'Retained Earnings', 'EBIT', 'Market Value of Equity', 'Book Value of Equity', 'Sales'],
+          rows: [['Alpha SA', 2023, 1000000, 600000, 200000, 300000, 150000, 1200000, 400000, 1800000], ['Alpha SA', 2024, 1050000, 680000, 150000, 310000, 90000, 900000, 370000, 1700000], ['Beta Ltd', 2024, 500000, 450000, 20000, -40000, 10000, 120000, 50000, 400000]] } }
     ],
     compute(v) {
       if (v.ta <= 0 || v.tl <= 0) return { error: 'Total assets and total liabilities must be positive.' };
@@ -98,21 +160,33 @@
       const X = [v.wc / v.ta, v.re / v.ta, v.ebit / v.ta, v.eq / v.tl, v.sales / v.ta].slice(0, m.c.length);
       const names = ['Working capital / Total assets', 'Retained earnings / Total assets', 'EBIT / Total assets', m.eq + ' / Total liabilities', 'Sales / Total assets'];
       const contrib = X.map((x, i) => x * m.c[i]);
-      const Z = contrib.reduce((a, b) => a + b, 0);
+      const Z = m.k + contrib.reduce((a, b) => a + b, 0);
       const zone = Z > m.hi ? 'safe' : Z < m.lo ? 'distress' : 'grey';
       const zoneTxt = { safe: 'SAFE ZONE', grey: 'GREY ZONE', distress: 'DISTRESS ZONE' }[zone];
       const rows = X.map((x, i) => [`X${i + 1}`, names[i], x, m.c[i], contrib[i]]);
+      if (m.k) rows.unshift(['', 'Constant', '', '', m.k]);
       rows.push(['', '<b>' + m.sym + ' (sum)</b>', '', '', Z]);
-      return {
+      const warnings = [];
+      // EM score for the rating equivalent (book equity)
+      const bookEq = v.model === 'public' ? (isFinite(v.beq) ? v.beq : v.eq) : v.eq;
+      if (v.model === 'public' && !isFinite(v.beq)) warnings.push('Rating equivalent and default probability use the market value of equity because no book value was entered. Altman\'s calibration uses book equity, so enter it for a closer match.');
+      const eX4 = bookEq / v.tl;
+      const EM = 3.25 + 6.56 * X[0] + 3.26 * X[1] + 6.72 * X[2] + 1.05 * eX4;
+      const year = v.breYear || '1996';
+      const bre = breOf(EM, year);
+      const ladder = BRE_RATINGS.map((r, i) => [r, BRE_MED[year][i], BRE_PD[i] === null ? 'default' : BRE_PD[i] / 100]);
+      const out = {
+        warnings,
         kpis: [
           { k: m.sym + ' score', v: num(Z, 3), raw: Z, s: m.name, cls: zoneClass(zone), big: true },
           { k: 'Classification', v: zoneTxt, s: `Distress < ${m.lo} ≤ Grey ≤ ${m.hi} < Safe`, cls: zoneClass(zone) },
-          { k: 'Largest contributor', v: 'X' + (contrib.indexOf(Math.max(...contrib)) + 1), s: names[contrib.indexOf(Math.max(...contrib))] }
+          { k: 'Bond-rating equivalent', v: bre.rating, raw: bre.rating, s: `EM score ${num(EM, 2)}; nearest ${year} median ${num(bre.median, 2)}`, cls: bre.i <= 9 ? 'good' : bre.i <= 13 ? 'warn' : 'bad' },
+          { k: 'Probability of default (1 year)', v: pdTxt(bre.pd), raw: bre.pd === null ? '' : bre.pd / 100, s: 'S&P average one-year default rate for ' + bre.rating + ', 1981-2023', cls: bre.pd === null || bre.pd >= 5 ? 'bad' : bre.pd >= 0.45 ? 'warn' : 'good' }
         ],
         html: zoneBar(Z, m.lo, m.hi, Math.min(0, m.lo - 1), Math.max(m.hi + 1.5, 4), ['Distress', 'Grey zone', 'Safe']),
         charts: [{
           id: 'contrib', title: 'Contribution of each ratio to ' + m.sym,
-          note: 'Bar length = coefficient × ratio. Hover for values.',
+          note: 'Bar length = coefficient × ratio' + (m.k ? ' (the 3.25 constant is not shown)' : '') + '. Hover for values.',
           exportData: () => ({ columns: ['Variable', 'Ratio', 'Coefficient', 'Contribution'], rows: X.map((x, i) => ['X' + (i + 1) + ' ' + names[i], x, m.c[i], contrib[i]]) }),
           build: T => ({
             type: 'bar',
@@ -120,14 +194,59 @@
             options: { indexAxis: 'y', plugins: { legend: { display: false }, tooltip: { callbacks: { title: it => names[it[0].dataIndex], label: c => ` ${m.c[c.dataIndex]} × ${num(X[c.dataIndex], 4)} = ${num(c.parsed.x, 4)}` } } }, scales: { x: { grid: { color: T.grid } }, y: { grid: { display: false } } } }
           })
         }],
-        tables: [{ id: 'ratios', title: 'Variable breakdown', columns: [{ h: 'Var', num: false }, { h: 'Description', num: false }, { h: 'Ratio', fmt: x => num(x, 4) }, { h: 'Coefficient', fmt: x => num(x, 3) }, { h: 'Contribution', fmt: x => num(x, 4) }], rows, hl: [rows.length - 1] }],
+        tables: [
+          { id: 'ratios', title: 'Variable breakdown', columns: [{ h: 'Var', num: false }, { h: 'Description', num: false }, { h: 'Ratio', fmt: x => num(x, 4) }, { h: 'Coefficient', fmt: x => num(x, 3) }, { h: 'Contribution', fmt: x => num(x, 4) }], rows, hl: [rows.length - 1] },
+          { id: 'ladder', title: 'Bond-rating equivalents (Altman ' + year + ' medians) and default rates', columns: [{ h: 'Rating', num: false }, { h: 'Median EM score', fmt: x => num(x, 2) }, { h: '1-year default rate', fmt: x => x === 0 ? '< 0.01%' : pct(x, 2) }], rows: ladder, hl: [bre.i],
+            note: 'The highlighted row is this firm. Default rates: S&P Global Ratings, average one-year global corporate default rates 1981-2023; grouped ratings use the average of their members and CCC+ to CCC- use the CCC/C rate.' }
+        ],
         steps: [
           { h: '1. Compute the ratios', f: X.map((x, i) => `X<sub>${i + 1}</sub> = ${names[i]} = ${num(x, 4)}`) },
-          { h: '2. Apply the ' + m.name + ' weights', f: [`${m.sym} = ` + m.c.map((c, i) => `${c}·X<sub>${i + 1}</sub>`).join(' + ')], calc: `${m.sym} = ` + m.c.map((c, i) => `${c}×${num(X[i], 4)}`).join(' + ') + ` = ${num(Z, 4)}` },
-          { h: '3. Classify', f: [`${m.sym} &lt; ${m.lo}: distress &nbsp;&nbsp; ${m.lo} ≤ ${m.sym} ≤ ${m.hi}: grey zone &nbsp;&nbsp; ${m.sym} &gt; ${m.hi}: safe`], calc: `${num(Z, 3)} ⇒ ${zoneTxt}` }
+          { h: '2. Apply the ' + m.name + ' weights', f: [`${m.sym} = ` + (m.k ? m.k + ' + ' : '') + m.c.map((c, i) => `${c}·X<sub>${i + 1}</sub>`).join(' + ')], calc: `${m.sym} = ` + (m.k ? m.k + ' + ' : '') + m.c.map((c, i) => `${c}×${num(X[i], 4)}`).join(' + ') + ` = ${num(Z, 4)}` },
+          { h: '3. Classify', f: [`${m.sym} &lt; ${m.lo}: distress &nbsp;&nbsp; ${m.lo} ≤ ${m.sym} ≤ ${m.hi}: grey zone &nbsp;&nbsp; ${m.sym} &gt; ${m.hi}: safe`], calc: `${num(Z, 3)} ⇒ ${zoneTxt}` },
+          { h: '4. Bond-rating equivalent', f: ['EM = 3.25 + 6.56·X<sub>1</sub> + 3.26·X<sub>2</sub> + 6.72·X<sub>3</sub> + 1.05·(Book equity / Total liabilities)', 'Rating = the S&P rating whose median EM score is closest to the firm\'s EM score'], calc: `EM = 3.25 + 6.56×${num(X[0], 4)} + 3.26×${num(X[1], 4)} + 6.72×${num(X[2], 4)} + 1.05×${num(eX4, 4)} = ${num(EM, 4)}\nNearest ${year} median: ${bre.rating} (${num(bre.median, 2)})`, note: 'This is Altman\'s bond-rating-equivalent method: firms with the same score as the median firm of a rating class are treated as having that rating\'s credit quality.' },
+          { h: '5. Probability of default', f: ['PD (1 year) = historical average one-year default rate of the equivalent rating'], calc: `${bre.rating} ⇒ ${pdTxt(bre.pd)}`, note: 'A rating-based PD is an average over 1981-2023; actual default risk varies with the credit cycle (higher in recessions).' }
         ],
-        refs: 'Altman, E. I. (1968). Financial ratios, discriminant analysis and the prediction of corporate bankruptcy. <i>Journal of Finance</i>, 23(4). Altman, E. I. (2000/2002), revised Z\' and Z\'\' models. Note: in the emerging-markets version of Z\'\' a constant of 3.25 is added (zones 4.35 / 5.85); this tool uses the original Z\'\' without the constant.'
+        refs: 'Altman, E. I. (1968). Financial ratios, discriminant analysis and the prediction of corporate bankruptcy. <i>Journal of Finance</i>, 23(4). Altman, E. I. (2000/2002), revised Z\' and Z\'\' models. Altman, E. I. (2005), An emerging market credit scoring system for corporate bonds, <i>Emerging Markets Review</i>, 6(4). Rating medians: Altman, "50 Years of the Altman Z-Score" (Compustat, company filings, S&P). Default rates: S&P Global Ratings, 2023 Annual Global Corporate Default and Rating Transition Study, Table 9.'
       };
+      // ---- Batch mode ----
+      const B = batchRows(v.batch);
+      if (B.length) {
+        const res = B.map(r => {
+          const ok = r.ta > 0 && r.tl > 0 && [r.wc, r.re, r.ebit, r.mve, r.bve].every(isFinite);
+          if (!ok) return { r, err: true };
+          const s = altmanAll(r); const b = breOf(s.EM, year);
+          return { r, s, b, sel: v.model === 'public' ? s.Z : v.model === 'private' ? s.Zp : v.model === 'non_mfg' ? s.Zpp : s.EM };
+        });
+        const bad = res.filter(x => x.err).length;
+        if (bad) warnings.push(`${bad} uploaded row(s) are missing required numbers (total assets, total liabilities, working capital or current assets/liabilities, retained earnings, EBIT, equity) and were skipped.`);
+        const noSales = res.some(x => !x.err && !isFinite(x.r.sales));
+        if (noSales) warnings.push('Some rows have no Sales column, so Z and Z\' are blank for them; Z\'\' and EM do not need sales.');
+        const notes = res.filter(x => x.r.notes.length).length;
+        if (notes) warnings.push(`${notes} row(s) had only one equity value; it was used for both market and book equity.`);
+        const good = res.filter(x => !x.err);
+        const label = x => x.r.firm + (x.r.year !== '' && x.r.year !== undefined ? ' ' + x.r.year : '');
+        out.tables.unshift({
+          id: 'batch', title: `Batch results (${good.length} rows from upload)`,
+          columns: [{ h: 'Firm', num: false }, { h: 'Year', num: false }, { h: 'Z', fmt: x => num(x, 2) }, { h: 'Z zone', num: false }, { h: "Z'", fmt: x => num(x, 2) }, { h: "Z' zone", num: false }, { h: "Z''", fmt: x => num(x, 2) }, { h: "Z'' zone", num: false }, { h: 'EM', fmt: x => num(x, 2) }, { h: 'Rating equiv.', num: false }, { h: 'PD 1-year', num: false }],
+          rows: good.map(x => [x.r.firm, String(x.r.year ?? ''), isFinite(x.s.Z) ? x.s.Z : '', zoneOf(x.s.Z, ALT.public), isFinite(x.s.Zp) ? x.s.Zp : '', zoneOf(x.s.Zp, ALT.private), x.s.Zpp, zoneOf(x.s.Zpp, ALT.non_mfg), x.s.EM, x.b.rating, pdTxt(x.b.pd)]),
+          note: 'Every row is scored with all four models. Z uses market equity; Z\', Z\'\' and EM use book equity. Rating equivalents use the ' + year + ' calibration.'
+        });
+        const zs = good.map(x => x.sel);
+        out.charts.unshift({
+          id: 'batchChart', title: m.sym + ' score by firm / year (uploaded data)',
+          note: 'Bars are coloured by zone; dashed lines are the ' + m.sym + ' cut-offs (' + m.lo + ' and ' + m.hi + ').',
+          exportData: () => ({ columns: ['Firm / year', m.sym, 'Zone', 'Rating equivalent', 'PD 1-year (%)'], rows: good.map((x, i) => [label(x), zs[i], zoneOf(zs[i], m), x.b.rating, x.b.pd === null ? 'default' : x.b.pd]) }),
+          build: T => ({
+            type: 'bar',
+            data: { labels: good.map(label), datasets: [
+              { label: m.sym, data: zs.map(z => isFinite(z) ? z : null), backgroundColor: zs.map(z => z > m.hi ? T.alpha(T.good, .8) : z < m.lo ? T.alpha(T.bad, .8) : T.alpha(T.warn, .8)), borderRadius: 5, order: 2 },
+              { type: 'line', label: 'Safe cut-off ' + m.hi, data: good.map(() => m.hi), borderColor: T.good, borderDash: [6, 4], borderWidth: 1.5, pointRadius: 0, order: 1 },
+              { type: 'line', label: 'Distress cut-off ' + m.lo, data: good.map(() => m.lo), borderColor: T.bad, borderDash: [6, 4], borderWidth: 1.5, pointRadius: 0, order: 1 }] },
+            options: { plugins: { legend: { position: 'bottom' }, tooltip: { callbacks: { afterLabel: c => c.datasetIndex === 0 ? ' Rating equiv. ' + good[c.dataIndex].b.rating + ', PD ' + pdTxt(good[c.dataIndex].b.pd) : '' } } }, scales: { x: { grid: { display: false } }, y: { grid: { color: T.grid } } } }
+          })
+        });
+      }
+      return out;
     }
   });
 
