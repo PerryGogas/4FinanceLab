@@ -158,7 +158,51 @@
   }
 
   // ---------------- Tool view ----------------
-  function defaults(t) { const v = {}; t.inputs.forEach(i => { if (i.type !== 'file') v[i.id] = i.value; }); return v; }
+  function defaults(t) { const v = {}; t.inputs.forEach(i => { if (i.type !== 'file' && i.type !== 'company') v[i.id] = i.value; }); return v; }
+
+  // ---------------- Company data: built-in snapshot + optional live relay ----------------
+  const RELAY_URL = (window.FL_RELAY_URL || '').replace(/\/$/, '');
+  const DATA_ASOF = 'Yahoo Finance snapshot, 1 Nov 2026';
+  const CO_FIELDS = ['date', 'ta', 'tl', 'wc', 'ca', 'cl', 're', 'ebit', 'bve', 'sales', 'ni', 'ocf', 'mve'];
+  const companyState = {};
+  let companyDB = null;
+  async function loadDB() {
+    if (companyDB) return companyDB;
+    try { companyDB = await fetch('data/companies.json?v=2.3.0').then(r => r.json()); } catch (e) { companyDB = []; }
+    return companyDB;
+  }
+  const coRow = a => { const o = {}; CO_FIELDS.forEach((f, k) => { o[f] = k === 0 ? a[0] : (a[k] == null ? null : a[k] * 1e6); }); return o; };
+  const marketName = d => d.m === 'GR' ? 'Athens' : d.x;
+  async function fetchCompany(q) {
+    const sym = String(q).trim().split(/\s/)[0].toUpperCase();
+    if (!sym) return null;
+    if (RELAY_URL) {
+      try {
+        const r = await fetch(RELAY_URL + '/company?symbol=' + encodeURIComponent(sym));
+        if (r.ok) { const d = await r.json(); if (d && d.y && d.y.length) return { d, source: 'live Yahoo Finance' }; }
+      } catch (e) { /* fall back to built-in */ }
+    }
+    const db = await loadDB();
+    const local = db.find(d => d.s.toUpperCase() === sym);
+    return local ? { d: local, source: DATA_ASOF } : null;
+  }
+  function applyCompany(t, i) {
+    const st = companyState[t.id]; const rows = st.d.y.slice().sort((a, b) => a[0] < b[0] ? -1 : 1);
+    const k = rows.findIndex(r => r[0] === st.year);
+    const cur = coRow(rows[k]), prev = k > 0 ? coRow(rows[k - 1]) : null;
+    const filled = i.map(cur, prev, parsed(), st.d);
+    st.missing = [];
+    Object.entries(filled).forEach(([key, val]) => {
+      if (val === null || val === undefined || (typeof val === 'number' && !isFinite(val))) { values[key] = ''; st.missing.push((t.inputs.find(x => x.id === key) || {}).label || key); }
+      else values[key] = typeof val === 'number' ? String(+val.toPrecision(12)) : val;
+    });
+    store.set('4fl-in-' + t.id, values);
+    renderInputs(); recompute();
+  }
+  async function datasetRows() {
+    const db = await loadDB();
+    return db.map(d => { const r = coRow(d.y.slice().sort((a, b) => a[0] < b[0] ? -1 : 1).pop()); return { 'Firm': d.s, 'Year': r.date.slice(0, 4), 'Total Assets': r.ta, 'Total Liabilities': r.tl, 'Working Capital': r.wc, 'Current Assets': r.ca, 'Current Liabilities': r.cl, 'Retained Earnings': r.re, 'EBIT': r.ebit, 'Market Value of Equity': r.mve, 'Book Value of Equity': r.bve, 'Sales': r.sales }; });
+  }
   const files = {};   // uploaded files per tool (kept in memory only)
   const fileOf = (tid, iid) => (files[tid] || {})[iid];
 
@@ -204,9 +248,17 @@
       if (i.type === 'select') ctl = `<select id="in_${i.id}">${i.options.map(o => `<option value="${esc(o[0])}" ${String(o[0]) === String(val) ? 'selected' : ''}>${esc(o[1])}</option>`).join('')}</select>`;
       else if (i.type === 'seg') ctl = `<div class="seg" id="in_${i.id}">${i.options.map(o => `<button type="button" data-v="${esc(o[0])}" class="${String(o[0]) === String(val) ? 'on' : ''}">${esc(o[1])}</button>`).join('')}</div>`;
       else if (i.type === 'textarea') ctl = `<textarea id="in_${i.id}" spellcheck="false">${esc(val ?? '')}</textarea>`;
+      else if (i.type === 'company') {
+        const st = companyState[t.id];
+        const years = st ? st.d.y.map(r => r[0]).sort().reverse() : [];
+        ctl = `<div class="co-row"><input id="in_${i.id}" list="dl_${i.id}" placeholder="Ticker, e.g. HTO.AT, AAPL, SAP.DE" value="${esc(st ? st.d.s : '')}" autocomplete="off" spellcheck="false"><datalist id="dl_${i.id}"></datalist>
+          <select id="yr_${i.id}" ${years.length ? '' : 'disabled'} title="Financial year">${years.length ? years.map(y => `<option value="${y}" ${st.year === y ? 'selected' : ''}>FY ${y.slice(0, 4)}</option>`).join('') : '<option>Year</option>'}</select>
+          <button type="button" class="btn primary" id="go_${i.id}">Load</button></div>
+          <div class="file-status">${st ? `<b>${esc(st.d.n)}</b> &middot; year ending ${st.year} &middot; ${esc(st.d.c)} &middot; ${esc(st.source)} <button type="button" class="reset-link" id="cx_${i.id}">clear</button>` : (RELAY_URL ? 'Any listed company (live from Yahoo Finance), or pick a built-in one.' : 'Pick one of the built-in Greek, US and European companies.')}</div>`;
+      }
       else if (i.type === 'file') {
         const f = fileOf(t.id, i.id);
-        ctl = `<div class="file-row"><label class="btn file-btn">${svg('xlsx')}<span>${f ? 'Replace file' : 'Choose file'}</span><input id="in_${i.id}" type="file" accept="${esc(i.accept || '')}" hidden></label>${i.template ? `<button type="button" class="btn" id="tpl_${i.id}">Template</button>` : ''}</div>
+        ctl = `<div class="file-row"><label class="btn file-btn">${svg('xlsx')}<span>${f ? 'Replace file' : 'Choose file'}</span><input id="in_${i.id}" type="file" accept="${esc(i.accept || '')}" hidden></label>${i.template ? `<button type="button" class="btn" id="tpl_${i.id}">Template</button>` : ''}${i.datasetButton ? `<button type="button" class="btn" id="ds_${i.id}">Built-in companies</button>` : ''}</div>
           <div class="file-status">${f ? `<b>${esc(f.name)}</b> &middot; ${f.rows.length} rows <button type="button" class="reset-link" id="fx_${i.id}">remove</button>` : 'No file loaded'}</div>`;
       }
       else ctl = `<input id="in_${i.id}" type="number" inputmode="decimal" step="${i.step ?? 'any'}" ${i.min !== undefined ? `min="${i.min}"` : ''} ${i.max !== undefined ? `max="${i.max}"` : ''} value="${val ?? ''}">`;
@@ -216,7 +268,40 @@
     $('#inputs').innerHTML = h;
     t.inputs.forEach(i => {
       const el = $('#in_' + i.id);
+      if (i.type === 'company') {
+        loadDB().then(db => { const dl = $('#dl_' + i.id); if (dl && !dl.children.length) dl.innerHTML = db.map(d => `<option value="${esc(d.s)}">${esc(d.n)} (${esc(marketName(d))})</option>`).join(''); });
+        if (RELAY_URL) {
+          let tm = null;
+          el.addEventListener('input', () => {
+            clearTimeout(tm); const q = el.value.trim(); if (q.length < 2) return;
+            tm = setTimeout(async () => {
+              try {
+                const r = await fetch(RELAY_URL + '/search?q=' + encodeURIComponent(q)).then(x => x.json());
+                const dl = $('#dl_' + i.id); if (!dl) return; const have = new Set([...dl.options].map(o => o.value));
+                (r.quotes || []).forEach(x => { if (!have.has(x.symbol)) dl.insertAdjacentHTML('beforeend', `<option value="${esc(x.symbol)}">${esc(x.name || '')} (${esc(x.exchange || '')})</option>`); });
+              } catch (e) { /* ignore */ }
+            }, 300);
+          });
+        }
+        const go = async () => {
+          const btn = $('#go_' + i.id); if (!el.value.trim()) { el.focus(); return; }
+          btn.disabled = true; btn.textContent = 'Loading...';
+          const res = await fetchCompany(el.value);
+          if (!res) { btn.disabled = false; btn.textContent = 'Load'; toast(RELAY_URL ? 'Company not found' : 'Not one of the built-in companies'); return; }
+          const years = res.d.y.map(r => r[0]).sort();
+          companyState[t.id] = { d: res.d, source: res.source, year: years[years.length - 1] };
+          applyCompany(t, i);
+          toast(res.d.s + ' loaded');
+        };
+        $('#go_' + i.id).addEventListener('click', go);
+        el.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
+        const yr = $('#yr_' + i.id); if (yr && companyState[t.id]) yr.addEventListener('change', () => { companyState[t.id].year = yr.value; applyCompany(t, i); });
+        const cx = $('#cx_' + i.id); if (cx) cx.addEventListener('click', () => { delete companyState[t.id]; renderInputs(); recompute(); });
+        return;
+      }
       if (i.type === 'file') {
+        const dsb = $('#ds_' + i.id);
+        if (dsb) dsb.addEventListener('click', async () => { const rows = await datasetRows(); (files[t.id] = files[t.id] || {})[i.id] = { name: 'Built-in companies (' + DATA_ASOF + ')', rows }; toast(rows.length + ' companies loaded'); renderInputs(); recompute(); });
         el.addEventListener('change', async () => {
           const f = el.files[0]; if (!f) return;
           try {
@@ -277,6 +362,7 @@
     current.inputs.forEach(i => {
       const raw = values[i.id];
       if (i.type === 'file') { const f = fileOf(current.id, i.id); v[i.id] = f ? f.rows : null; return; }
+      if (i.type === 'company') { v[i.id] = null; return; }
       v[i.id] = (i.type === 'select' || i.type === 'seg' || i.type === 'textarea') ? raw : (raw === '' || raw === null || raw === undefined ? NaN : parseFloat(raw));
     });
     return v;
@@ -286,11 +372,16 @@
     const t = current, v = parsed();
     // validation of visible, enabled, required numeric inputs
     const missing = t.inputs.filter(i => (!i.type || i.type === 'number') && !i.optional && !(i.showIf && !i.showIf(v)) && !(i.disabledIf && i.disabledIf(v)) && !isFinite(v[i.id]));
-    if (missing.length) { lastResult = { error: 'Please enter a valid number for: ' + missing.map(i => i.label.replace(/<[^>]+>/g, '')).join(', ') + '.' }; }
+    const hasFile = t.inputs.some(i => i.type === 'file' && fileOf(t.id, i.id));
+    if (missing.length && hasFile) v.__singleInvalid = 'Please enter a valid number for: ' + missing.map(i => i.label.replace(/<[^>]+>/g, '')).join(', ') + '.';
+    if (missing.length && !hasFile) { lastResult = { error: 'Please enter a valid number for: ' + missing.map(i => i.label.replace(/<[^>]+>/g, '')).join(', ') + '.' }; }
     else {
       try { lastResult = t.compute(v) || {}; }
       catch (e) { console.error(e); lastResult = { error: 'Calculation error: ' + e.message }; }
     }
+    const cst = companyState[t.id];
+    if (cst && cst.missing && cst.missing.length) lastResult.warnings = (lastResult.warnings || []).concat('Not available from the data source for ' + cst.d.s + ' (year ending ' + cst.year + '): ' + cst.missing.join(', ') + '. Enter these from the annual report.');
+    if (cst) lastResult.warnings = (lastResult.warnings || []).concat('Company data: ' + cst.d.n + ', year ending ' + cst.year + ', amounts in ' + cst.d.c + ' (' + cst.source + '). Check key figures against the annual report before relying on them.');
     // write solved values back into disabled fields
     if (lastResult.solved) Object.entries(lastResult.solved).forEach(([k, x]) => { const el = $('#in_' + k); if (el) el.value = isFinite(x) ? +x.toFixed(6) : ''; });
     renderResults(false);
@@ -391,6 +482,7 @@
     current.inputs.forEach(i => {
       if (i.showIf && !i.showIf(v)) return;
       if (i.type === 'file') { const f = fileOf(current.id, i.id); if (f) rows.push([stripTags(i.label), f.name + ' (' + f.rows.length + ' rows)', '']); return; }
+      if (i.type === 'company') { const st = companyState[current.id]; if (st) rows.push(['Company data', st.d.n + ' (' + st.d.s + '), year ending ' + st.year + ', ' + st.source, st.d.c]); return; }
       let val = values[i.id];
       if (i.type === 'select' || i.type === 'seg') { const o = i.options.find(o => String(o[0]) === String(val)); val = o ? o[1] : val; }
       else if (i.type !== 'textarea') { val = lastResult.solved && i.id in lastResult.solved ? lastResult.solved[i.id] : parseFloat(val); }

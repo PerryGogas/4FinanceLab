@@ -134,11 +134,57 @@
       return { firm: map.firm ? String(r[map.firm]) : 'Row ' + (idx + 1), year: map.year ? r[map.year] : '', ta: g('ta'), tl: g('tl'), wc, re: g('re'), ebit: g('ebit'), mve, bve, sales: g('sales'), notes };
     });
   }
+  // US GNP implicit price deflator rebased to 1968 = 100 (FRED A001RD3A086NBEA, 2017 = 100; 1968 = 18.246). Ohlson uses the year before the balance sheet.
+  const GNP_1968 = { 2020: 577.1, 2021: 603.3, 2022: 646.4, 2023: 670.6, 2024: 687.8, 2025: 705.9 };
+  const gnpIndex = date => { const y = Math.min(2025, Math.max(2020, +String(date).slice(0, 4) - 1)); return GNP_1968[y]; };
+  const companyInput = map => ({ id: 'company', label: 'Load company data', type: 'company', optional: true, map,
+    hint: 'Fills the inputs below from the latest annual statements. You can still edit any value.' });
+  function altBatch(out, v, m, year) {
+      const B = batchRows(v.batch);
+      if (B.length) {
+        const res = B.map(r => {
+          const ok = r.ta > 0 && r.tl > 0 && [r.wc, r.re, r.ebit, r.mve, r.bve].every(isFinite);
+          if (!ok) return { r, err: true };
+          const s = altmanAll(r); const b = breOf(s.EM, year);
+          return { r, s, b, sel: v.model === 'public' ? s.Z : v.model === 'private' ? s.Zp : v.model === 'non_mfg' ? s.Zpp : s.EM };
+        });
+        const bad = res.filter(x => x.err).length;
+        if (bad) out.warnings.push(`${bad} uploaded row(s) are missing required numbers (total assets, total liabilities, working capital or current assets/liabilities, retained earnings, EBIT, equity) and were skipped.`);
+        const noSales = res.some(x => !x.err && !isFinite(x.r.sales));
+        if (noSales) out.warnings.push('Some rows have no Sales column, so Z and Z\' are blank for them; Z\'\' and EM do not need sales.');
+        const notes = res.filter(x => x.r.notes.length).length;
+        if (notes) out.warnings.push(`${notes} row(s) had only one equity value; it was used for both market and book equity.`);
+        const good = res.filter(x => !x.err);
+        const label = x => x.r.firm + (x.r.year !== '' && x.r.year !== undefined ? ' ' + x.r.year : '');
+        out.tables.unshift({
+          id: 'batch', title: `Batch results (${good.length} rows from upload)`,
+          columns: [{ h: 'Firm', num: false }, { h: 'Year', num: false }, { h: 'Z', fmt: x => num(x, 2) }, { h: 'Z zone', num: false }, { h: "Z'", fmt: x => num(x, 2) }, { h: "Z' zone", num: false }, { h: "Z''", fmt: x => num(x, 2) }, { h: "Z'' zone", num: false }, { h: 'EM', fmt: x => num(x, 2) }, { h: 'Rating equiv.', num: false }, { h: 'PD 1-year', num: false }],
+          rows: good.map(x => [x.r.firm, String(x.r.year ?? ''), isFinite(x.s.Z) ? x.s.Z : '', zoneOf(x.s.Z, ALT.public), isFinite(x.s.Zp) ? x.s.Zp : '', zoneOf(x.s.Zp, ALT.private), x.s.Zpp, zoneOf(x.s.Zpp, ALT.non_mfg), x.s.EM, x.b.rating, pdTxt(x.b.pd)]),
+          note: 'Every row is scored with all four models. Z uses market equity; Z\', Z\'\' and EM use book equity. Rating equivalents use the ' + year + ' calibration.'
+        });
+        const zs = good.map(x => x.sel);
+        out.charts.unshift({
+          id: 'batchChart', title: m.sym + ' score by firm / year (uploaded data)',
+          note: 'Bars are coloured by zone; dashed lines are the ' + m.sym + ' cut-offs (' + m.lo + ' and ' + m.hi + ').',
+          exportData: () => ({ columns: ['Firm / year', m.sym, 'Zone', 'Rating equivalent', 'PD 1-year (%)'], rows: good.map((x, i) => [label(x), zs[i], zoneOf(zs[i], m), x.b.rating, x.b.pd === null ? 'default' : x.b.pd]) }),
+          build: T => ({
+            type: 'bar',
+            data: { labels: good.map(label), datasets: [
+              { label: m.sym, data: zs.map(z => isFinite(z) ? z : null), backgroundColor: zs.map(z => z > m.hi ? T.alpha(T.good, .8) : z < m.lo ? T.alpha(T.bad, .8) : T.alpha(T.warn, .8)), borderRadius: 5, order: 2 },
+              { type: 'line', label: 'Safe cut-off ' + m.hi, data: good.map(() => m.hi), borderColor: T.good, borderDash: [6, 4], borderWidth: 1.5, pointRadius: 0, order: 1 },
+              { type: 'line', label: 'Distress cut-off ' + m.lo, data: good.map(() => m.lo), borderColor: T.bad, borderDash: [6, 4], borderWidth: 1.5, pointRadius: 0, order: 1 }] },
+            options: { plugins: { legend: { position: 'bottom' }, tooltip: { callbacks: { afterLabel: c => c.datasetIndex === 0 ? ' Rating equiv. ' + good[c.dataIndex].b.rating + ', PD ' + pdTxt(good[c.dataIndex].b.pd) : '' } } }, scales: { x: { grid: { display: false } }, y: { grid: { color: T.grid } } } }
+          })
+        });
+      }
+    return out;
+  }
   TOOLS.push({
     id: 'altman', cat: 'distress', icon: 'gauge', title: 'Altman Z-Score Analyzer', short: 'Altman Z-Score',
     desc: 'Z, Z\', Z\'\' and EM score with zones, bond-rating equivalent, default probability and Excel/CSV batch upload.',
     long: 'Altman\'s distress models: the original Z for public manufacturers (1968), Z\' for private firms, Z\'\' for non-manufacturing firms and the EM score (Z\'\' + 3.25). Every firm also gets Altman\'s bond-rating equivalent and the historical one-year default rate of that rating. Upload an Excel or CSV file to score many firms or years at once.',
     inputs: [
+      companyInput((c, p, v) => ({ ta: c.ta, tl: c.tl, wc: c.wc ?? (c.ca != null && c.cl != null ? c.ca - c.cl : null), re: c.re, ebit: c.ebit, eq: v.model === 'public' ? c.mve : c.bve, beq: c.bve, sales: c.sales })),
       { id: 'model', label: 'Model', type: 'seg', value: 'public', options: [['public', 'Z public'], ['private', "Z' private"], ['non_mfg', "Z'' non-mfg"], ['em', 'EM score']] },
       { id: 'ta', label: 'Total assets', unit: '$', value: 1000000 },
       { id: 'tl', label: 'Total liabilities', unit: '$', value: 600000 },
@@ -149,14 +195,19 @@
       { id: 'beq', label: 'Book value of equity', unit: '$ (optional)', value: '', optional: true, showIf: v => v.model === 'public', hint: 'Used for the rating equivalent and default probability, which Altman bases on book equity. Leave empty to use the market value above.' },
       { id: 'sales', label: 'Sales (revenue)', unit: '$', value: 1800000, showIf: v => v.model === 'public' || v.model === 'private' },
       { id: 'breYear', label: 'Rating calibration', type: 'select', value: '1996', options: [['1996', 'Altman 1996 medians (classic)'], ['2006', 'Altman 2006 medians'], ['2013', 'Altman 2013 medians (latest)']] },
-      { id: 'batch', label: 'Batch: upload Excel or CSV', type: 'file', optional: true, accept: '.xlsx,.xls,.csv',
-        hint: 'One row per firm or year. Download the template for the column names.',
+      { id: 'batch', label: 'Batch: upload Excel or CSV', type: 'file', optional: true, accept: '.xlsx,.xls,.csv', datasetButton: true,
+        hint: 'One row per firm or year. Download the template for the column names, or click Built-in companies to score all the included firms (latest year).',
         template: { name: '4FinanceLab_Altman_template.xlsx', columns: ['Firm', 'Year', 'Total Assets', 'Total Liabilities', 'Working Capital', 'Retained Earnings', 'EBIT', 'Market Value of Equity', 'Book Value of Equity', 'Sales'],
           rows: [['Alpha SA', 2023, 1000000, 600000, 200000, 300000, 150000, 1200000, 400000, 1800000], ['Alpha SA', 2024, 1050000, 680000, 150000, 310000, 90000, 900000, 370000, 1700000], ['Beta Ltd', 2024, 500000, 450000, 20000, -40000, 10000, 120000, 50000, 400000]] } }
     ],
     compute(v) {
-      if (v.ta <= 0 || v.tl <= 0) return { error: 'Total assets and total liabilities must be positive.' };
       const m = ALT[v.model];
+      const year = v.breYear || '1996';
+      if (v.__singleInvalid || !(v.ta > 0 && v.tl > 0)) {
+        const why = v.__singleInvalid || 'Total assets and total liabilities must be positive.';
+        if (!(Array.isArray(v.batch) && v.batch.length)) return { error: why };
+        return altBatch({ warnings: ['Single-firm inputs: ' + why + ' Batch results are shown below.'], kpis: [], charts: [], tables: [], steps: [] }, v, m, year);
+      }
       const X = [v.wc / v.ta, v.re / v.ta, v.ebit / v.ta, v.eq / v.tl, v.sales / v.ta].slice(0, m.c.length);
       const names = ['Working capital / Total assets', 'Retained earnings / Total assets', 'EBIT / Total assets', m.eq + ' / Total liabilities', 'Sales / Total assets'];
       const contrib = X.map((x, i) => x * m.c[i]);
@@ -172,7 +223,6 @@
       if (v.model === 'public' && !isFinite(v.beq)) warnings.push('Rating equivalent and default probability use the market value of equity because no book value was entered. Altman\'s calibration uses book equity, so enter it for a closer match.');
       const eX4 = bookEq / v.tl;
       const EM = 3.25 + 6.56 * X[0] + 3.26 * X[1] + 6.72 * X[2] + 1.05 * eX4;
-      const year = v.breYear || '1996';
       const bre = breOf(EM, year);
       const ladder = BRE_RATINGS.map((r, i) => [r, BRE_MED[year][i], BRE_PD[i] === null ? 'default' : BRE_PD[i] / 100]);
       const out = {
@@ -208,45 +258,7 @@
         ],
         refs: 'Altman, E. I. (1968). Financial ratios, discriminant analysis and the prediction of corporate bankruptcy. <i>Journal of Finance</i>, 23(4). Altman, E. I. (2000/2002), revised Z\' and Z\'\' models. Altman, E. I. (2005), An emerging market credit scoring system for corporate bonds, <i>Emerging Markets Review</i>, 6(4). Rating medians: Altman, "50 Years of the Altman Z-Score" (Compustat, company filings, S&P). Default rates: S&P Global Ratings, 2023 Annual Global Corporate Default and Rating Transition Study, Table 9.'
       };
-      // ---- Batch mode ----
-      const B = batchRows(v.batch);
-      if (B.length) {
-        const res = B.map(r => {
-          const ok = r.ta > 0 && r.tl > 0 && [r.wc, r.re, r.ebit, r.mve, r.bve].every(isFinite);
-          if (!ok) return { r, err: true };
-          const s = altmanAll(r); const b = breOf(s.EM, year);
-          return { r, s, b, sel: v.model === 'public' ? s.Z : v.model === 'private' ? s.Zp : v.model === 'non_mfg' ? s.Zpp : s.EM };
-        });
-        const bad = res.filter(x => x.err).length;
-        if (bad) warnings.push(`${bad} uploaded row(s) are missing required numbers (total assets, total liabilities, working capital or current assets/liabilities, retained earnings, EBIT, equity) and were skipped.`);
-        const noSales = res.some(x => !x.err && !isFinite(x.r.sales));
-        if (noSales) warnings.push('Some rows have no Sales column, so Z and Z\' are blank for them; Z\'\' and EM do not need sales.');
-        const notes = res.filter(x => x.r.notes.length).length;
-        if (notes) warnings.push(`${notes} row(s) had only one equity value; it was used for both market and book equity.`);
-        const good = res.filter(x => !x.err);
-        const label = x => x.r.firm + (x.r.year !== '' && x.r.year !== undefined ? ' ' + x.r.year : '');
-        out.tables.unshift({
-          id: 'batch', title: `Batch results (${good.length} rows from upload)`,
-          columns: [{ h: 'Firm', num: false }, { h: 'Year', num: false }, { h: 'Z', fmt: x => num(x, 2) }, { h: 'Z zone', num: false }, { h: "Z'", fmt: x => num(x, 2) }, { h: "Z' zone", num: false }, { h: "Z''", fmt: x => num(x, 2) }, { h: "Z'' zone", num: false }, { h: 'EM', fmt: x => num(x, 2) }, { h: 'Rating equiv.', num: false }, { h: 'PD 1-year', num: false }],
-          rows: good.map(x => [x.r.firm, String(x.r.year ?? ''), isFinite(x.s.Z) ? x.s.Z : '', zoneOf(x.s.Z, ALT.public), isFinite(x.s.Zp) ? x.s.Zp : '', zoneOf(x.s.Zp, ALT.private), x.s.Zpp, zoneOf(x.s.Zpp, ALT.non_mfg), x.s.EM, x.b.rating, pdTxt(x.b.pd)]),
-          note: 'Every row is scored with all four models. Z uses market equity; Z\', Z\'\' and EM use book equity. Rating equivalents use the ' + year + ' calibration.'
-        });
-        const zs = good.map(x => x.sel);
-        out.charts.unshift({
-          id: 'batchChart', title: m.sym + ' score by firm / year (uploaded data)',
-          note: 'Bars are coloured by zone; dashed lines are the ' + m.sym + ' cut-offs (' + m.lo + ' and ' + m.hi + ').',
-          exportData: () => ({ columns: ['Firm / year', m.sym, 'Zone', 'Rating equivalent', 'PD 1-year (%)'], rows: good.map((x, i) => [label(x), zs[i], zoneOf(zs[i], m), x.b.rating, x.b.pd === null ? 'default' : x.b.pd]) }),
-          build: T => ({
-            type: 'bar',
-            data: { labels: good.map(label), datasets: [
-              { label: m.sym, data: zs.map(z => isFinite(z) ? z : null), backgroundColor: zs.map(z => z > m.hi ? T.alpha(T.good, .8) : z < m.lo ? T.alpha(T.bad, .8) : T.alpha(T.warn, .8)), borderRadius: 5, order: 2 },
-              { type: 'line', label: 'Safe cut-off ' + m.hi, data: good.map(() => m.hi), borderColor: T.good, borderDash: [6, 4], borderWidth: 1.5, pointRadius: 0, order: 1 },
-              { type: 'line', label: 'Distress cut-off ' + m.lo, data: good.map(() => m.lo), borderColor: T.bad, borderDash: [6, 4], borderWidth: 1.5, pointRadius: 0, order: 1 }] },
-            options: { plugins: { legend: { position: 'bottom' }, tooltip: { callbacks: { afterLabel: c => c.datasetIndex === 0 ? ' Rating equiv. ' + good[c.dataIndex].b.rating + ', PD ' + pdTxt(good[c.dataIndex].b.pd) : '' } } }, scales: { x: { grid: { display: false } }, y: { grid: { color: T.grid } } } }
-          })
-        });
-      }
-      return out;
+      return altBatch(out, v, m, year);
     }
   });
 
@@ -258,6 +270,7 @@
     desc: 'Ohlson (1980) O-Score logit probability of failure, side by side with Altman\'s Z.',
     long: 'Ohlson\'s nine-factor logit model gives a probability of bankruptcy; the Altman public-firm Z-Score is shown alongside for comparison.',
     inputs: [
+      companyInput((c, p) => ({ ta: c.ta, tl: c.tl, wc: c.wc ?? (c.ca != null && c.cl != null ? c.ca - c.cl : null), re: c.re, ebit: c.ebit, mve: c.mve, rev: c.sales, ca: c.ca, cl: c.cl, ni: c.ni, nip: p ? p.ni : null, ffo: c.ocf, gnp: gnpIndex(c.date) })),
       { id: 'thr', label: 'Probability threshold', type: 'select', value: '0.5', options: [['0.5', 'Commercial (50%)'], ['0.7', 'Banking (70%)'], ['custom', 'Custom...']] },
       { id: 'cthr', label: 'Custom threshold', unit: '%', value: 50, showIf: v => v.thr === 'custom' },
       { id: 'ta', label: 'Total assets', unit: '$', value: 1000000 },
@@ -271,8 +284,8 @@
       { id: 'cl', label: 'Current liabilities', unit: '$', value: 200000 },
       { id: 'ni', label: 'Net income (year t)', unit: '$', value: 20000 },
       { id: 'nip', label: 'Net income (year t−1)', unit: '$', value: -5000 },
-      { id: 'ffo', label: 'Funds from operations', unit: '$', value: 40000 },
-      { id: 'gnp', label: 'GNP price-level index', value: 100, hint: 'SIZE = ln(Total assets / index). Ohlson used a 1968 = 100 base.' }
+      { id: 'ffo', label: 'Funds from operations', unit: '$', value: 40000, hint: 'Loaded company data uses cash flow from operations as the proxy.' },
+      { id: 'gnp', label: 'GNP price-level index', value: 100, hint: 'SIZE = ln(Total assets in currency units / index). Ohlson (1980): US GNP price-level index with 1968 = 100, taken for the year before the balance sheet; about 688 for FY2025 statements. Filled automatically when you load company data.' }
     ],
     compute(v) {
       if (v.ta <= 0 || v.tl <= 0 || v.ca <= 0 || v.gnp <= 0) return { error: 'Total assets, total liabilities, current assets and the price index must be positive.' };
