@@ -158,6 +158,12 @@
   }
 
   // ---------------- Tool view ----------------
+  function colsOf(t, i) {
+    const src = t.inputs.find(x => x.id === i.from), f = fileOf(t.id, i.from);
+    const rows = f ? f.rows : (src && src.demo && src.demo.auto ? src.demo.rows() : []);
+    const cols = []; rows.slice(0, 50).forEach(r => Object.keys(r).forEach(k => { if (!cols.includes(k)) cols.push(k); }));
+    return cols;
+  }
   function defaults(t) { const v = {}; t.inputs.forEach(i => { if (i.type !== 'file' && i.type !== 'company') v[i.id] = i.value; }); return v; }
 
   // ---------------- Company data: built-in snapshot + optional live relay ----------------
@@ -256,10 +262,16 @@
           <button type="button" class="btn primary" id="go_${i.id}">Load</button></div>
           <div class="file-status">${st ? `<b>${esc(st.d.n)}</b> &middot; year ending ${st.year} &middot; ${esc(st.d.c)} &middot; ${esc(st.source)} <button type="button" class="reset-link" id="cx_${i.id}">clear</button>` : (RELAY_URL ? 'Any listed company (live from Yahoo Finance), or pick a built-in one.' : 'Pick one of the built-in Greek, US and European companies.')}</div>`;
       }
+      else if (i.type === 'colpick') {
+        const cols = colsOf(t, i);
+        if (!cols.length) ctl = `<select id="in_${i.id}" disabled><option>Load a file first</option></select>`;
+        else if (!i.multi) { const cur = cols.includes(val) ? val : (i.auto ? i.auto(cols) : ''); ctl = `<select id="in_${i.id}">${cur ? '' : '<option value="">Choose a column...</option>'}${cols.map(c => `<option value="${esc(c)}" ${c === cur ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>`; }
+        else { let sel = []; try { sel = JSON.parse(val || '[]'); } catch (e) { sel = []; } ctl = `<div class="colpick" id="in_${i.id}">${cols.map(c => `<label class="chk"><input type="checkbox" value="${esc(c)}" ${sel.includes(c) ? 'checked' : ''}><span>${esc(c)}</span></label>`).join('')}</div>`; }
+      }
       else if (i.type === 'file') {
         const f = fileOf(t.id, i.id);
-        ctl = `<div class="file-row"><label class="btn file-btn">${svg('xlsx')}<span>${f ? 'Replace file' : 'Choose file'}</span><input id="in_${i.id}" type="file" accept="${esc(i.accept || '')}" hidden></label>${i.template ? `<button type="button" class="btn" id="tpl_${i.id}">Template</button>` : ''}${i.datasetButton ? `<button type="button" class="btn" id="ds_${i.id}">Built-in companies</button>` : ''}</div>
-          <div class="file-status">${f ? `<b>${esc(f.name)}</b> &middot; ${f.rows.length} rows <button type="button" class="reset-link" id="fx_${i.id}">remove</button>` : 'No file loaded'}</div>`;
+        ctl = `<div class="file-row"><label class="btn file-btn">${svg('xlsx')}<span>${f ? 'Replace file' : 'Choose file'}</span><input id="in_${i.id}" type="file" accept="${esc(i.accept || '')}" hidden></label>${i.template ? `<button type="button" class="btn" id="tpl_${i.id}">Template</button>` : ''}${i.datasetButton ? `<button type="button" class="btn" id="ds_${i.id}">Built-in companies</button>` : ''}${i.demo ? `<button type="button" class="btn" id="dm_${i.id}">${esc(i.demo.label)}</button>` : ''}</div>
+          <div class="file-status">${f ? `<b>${esc(f.name)}</b> &middot; ${f.rows.length} rows <button type="button" class="reset-link" id="fx_${i.id}">remove</button>` : (i.demo && i.demo.auto ? 'No file loaded: the demo sample is used' : 'No file loaded')}</div>`;
       }
       else ctl = `<input id="in_${i.id}" type="number" inputmode="decimal" step="${i.step ?? 'any'}" ${i.min !== undefined ? `min="${i.min}"` : ''} ${i.max !== undefined ? `max="${i.max}"` : ''} value="${val ?? ''}">`;
       h += `<div class="field" data-f="${i.id}">${lab}${ctl}${i.hint ? `<div class="hint">${i.hint}</div>` : ''}</div>`;
@@ -299,8 +311,16 @@
         const cx = $('#cx_' + i.id); if (cx) cx.addEventListener('click', () => { delete companyState[t.id]; renderInputs(); recompute(); });
         return;
       }
+      if (i.type === 'colpick') {
+        if (!el || el.disabled) return;
+        if (i.multi) el.addEventListener('change', () => { values[i.id] = JSON.stringify([...el.querySelectorAll('input:checked')].map(x => x.value)); changed(false); });
+        else el.addEventListener('change', () => { values[i.id] = el.value; changed(true); });
+        return;
+      }
       if (i.type === 'file') {
         const dsb = $('#ds_' + i.id);
+        const dmb = $('#dm_' + i.id);
+        if (dmb) dmb.addEventListener('click', () => { const rows = i.demo.rows(); (files[t.id] = files[t.id] || {})[i.id] = { name: i.demo.name, rows }; toast(rows.length + ' rows loaded'); renderInputs(); recompute(); });
         if (dsb) dsb.addEventListener('click', async () => { const rows = await datasetRows(); (files[t.id] = files[t.id] || {})[i.id] = { name: 'Built-in companies (' + DATA_ASOF + ')', rows }; toast(rows.length + ' companies loaded'); renderInputs(); recompute(); });
         el.addEventListener('change', async () => {
           const f = el.files[0]; if (!f) return;
@@ -363,6 +383,7 @@
       const raw = values[i.id];
       if (i.type === 'file') { const f = fileOf(current.id, i.id); v[i.id] = f ? f.rows : null; return; }
       if (i.type === 'company') { v[i.id] = null; return; }
+      if (i.type === 'colpick') { if (i.multi) { try { v[i.id] = JSON.parse(raw || '[]'); } catch (e) { v[i.id] = []; } } else v[i.id] = raw || ''; return; }
       v[i.id] = (i.type === 'select' || i.type === 'seg' || i.type === 'textarea') ? raw : (raw === '' || raw === null || raw === undefined ? NaN : parseFloat(raw));
     });
     return v;
@@ -482,6 +503,7 @@
     current.inputs.forEach(i => {
       if (i.showIf && !i.showIf(v)) return;
       if (i.type === 'file') { const f = fileOf(current.id, i.id); if (f) rows.push([stripTags(i.label), f.name + ' (' + f.rows.length + ' rows)', '']); return; }
+      if (i.type === 'colpick') { const x = v[i.id]; rows.push([stripTags(i.label), Array.isArray(x) ? x.join(', ') : (x || '(automatic)'), '']); return; }
       if (i.type === 'company') { const st = companyState[current.id]; if (st) rows.push(['Company data', st.d.n + ' (' + st.d.s + '), year ending ' + st.year + ', ' + st.source, st.d.c]); return; }
       let val = values[i.id];
       if (i.type === 'select' || i.type === 'seg') { const o = i.options.find(o => String(o[0]) === String(val)); val = o ? o[1] : val; }

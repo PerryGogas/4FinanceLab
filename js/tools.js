@@ -24,7 +24,8 @@
     cash: '<rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="3"/><path d="M6 10v4M18 10v4"/>',
     loan: '<path d="M3 10l9-6 9 6"/><path d="M5 10v9M19 10v9M9 10v9M15 10v9M3 21h18"/>',
     pie: '<path d="M12 3v9h9"/><path d="M20.5 15.5A9 9 0 1 1 8.5 3.7"/>',
-    sml: '<path d="M3 21V3M3 21h18"/><path d="M5 17l14-10"/><circle cx="13" cy="10" r="1.6"/>'
+    sml: '<path d="M3 21V3M3 21h18"/><path d="M5 17l14-10"/><circle cx="13" cy="10" r="1.6"/>',
+    lab: '<path d="M9 3h6M10 3v6L4.5 19a1.5 1.5 0 0 0 1.3 2h12.4a1.5 1.5 0 0 0 1.3-2L14 9V3"/><path d="M7 15h10"/>'
   };
 
   window.FL_CATS = [
@@ -1068,6 +1069,501 @@
           { h: '2. Jensen\'s alpha', f: ['α<sub>i</sub> = forecast E(R<sub>i</sub>) − CAPM required return'], calc: sec.filter(s => isFinite(s.alpha)).map(s => `Security ${s.i}: ${pct(s.f, 3)} − ${pct(s.req, 3)} = ${pct(s.alpha, 3)}`).join('\n') || 'Enter forecast returns to compute alpha.' }
         ]
       };
+    }
+  });
+
+  /* =====================================================================
+     13. RE-ESTIMATE DISTRESS MODEL WEIGHTS ON YOUR OWN SAMPLE (LDA + LOGIT)
+     ===================================================================== */
+  // ---- small numerical helpers ----
+  function matInv(A) {
+    const n = A.length; const M = A.map((r, i) => r.concat(Array.from({ length: n }, (_, j) => i === j ? 1 : 0)));
+    for (let c = 0; c < n; c++) {
+      let p = c; for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+      if (!(Math.abs(M[p][c]) > 1e-10)) return null;
+      const tmp = M[c]; M[c] = M[p]; M[p] = tmp;
+      const d = M[c][c]; for (let j = 0; j < 2 * n; j++) M[c][j] /= d;
+      for (let r = 0; r < n; r++) if (r !== c) { const f = M[r][c]; if (f) for (let j = 0; j < 2 * n; j++) M[r][j] -= f * M[c][j]; }
+    }
+    return M.map(r => r.slice(n));
+  }
+  function lgam(x) {
+    const g = [76.18009172947146, -86.50532032941677, 24.01409824083091, -1.231739572450155, 0.1208650973866179e-2, -0.5395239384953e-5];
+    let y = x, t = x + 5.5; t -= (x + 0.5) * Math.log(t); let s = 1.000000000190015;
+    for (let j = 0; j < 6; j++) s += g[j] / ++y;
+    return -t + Math.log(2.5066282746310005 * s / x);
+  }
+  function betacf(a, b, x) {
+    let qab = a + b, qap = a + 1, qam = a - 1, c = 1, d = 1 - qab * x / qap; if (Math.abs(d) < 1e-30) d = 1e-30; d = 1 / d; let h = d;
+    for (let m = 1; m <= 300; m++) {
+      const m2 = 2 * m; let aa = m * (b - m) * x / ((qam + m2) * (a + m2));
+      d = 1 + aa * d; if (Math.abs(d) < 1e-30) d = 1e-30; c = 1 + aa / c; if (Math.abs(c) < 1e-30) c = 1e-30; d = 1 / d; h *= d * c;
+      aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2));
+      d = 1 + aa * d; if (Math.abs(d) < 1e-30) d = 1e-30; c = 1 + aa / c; if (Math.abs(c) < 1e-30) c = 1e-30; d = 1 / d; const del = d * c; h *= del;
+      if (Math.abs(del - 1) < 3e-14) break;
+    }
+    return h;
+  }
+  function betaInc(a, b, x) {
+    if (x <= 0) return 0; if (x >= 1) return 1;
+    const bt = Math.exp(lgam(a + b) - lgam(a) - lgam(b) + a * Math.log(x) + b * Math.log(1 - x));
+    return x < (a + 1) / (a + b + 2) ? bt * betacf(a, b, x) / a : 1 - bt * betacf(b, a, 1 - x) / b;
+  }
+  const fPval = (f, d1, d2) => !(f > 0) ? 1 : betaInc(d2 / 2, d1 / 2, d2 / (d2 + d1 * f));
+  function gammaP(a, x) {
+    if (x <= 0) return 0;
+    if (x < a + 1) { let ap = a, sum = 1 / a, del = sum; for (let n = 0; n < 500; n++) { ap++; del *= x / ap; sum += del; if (Math.abs(del) < Math.abs(sum) * 1e-15) break; } return sum * Math.exp(-x + a * Math.log(x) - lgam(a)); }
+    let b = x + 1 - a, c = 1e300, d = 1 / b, h = d;
+    for (let i = 1; i < 500; i++) { const an = -i * (i - a); b += 2; d = an * d + b; if (Math.abs(d) < 1e-300) d = 1e-300; c = b + an / c; if (Math.abs(c) < 1e-300) c = 1e-300; d = 1 / d; const del = d * c; h *= del; if (Math.abs(del - 1) < 1e-15) break; }
+    return 1 - Math.exp(-x + a * Math.log(x) - lgam(a)) * h;
+  }
+  const chi2Pval = (x, df) => !(x > 0) ? 1 : 1 - gammaP(df / 2, x / 2);
+  const sig = (x, d) => !isFinite(x) ? num(x) : x !== 0 && (Math.abs(x) < 0.01 || Math.abs(x) >= 1e5) ? x.toExponential(Math.max(2, d - 1)).replace('-', '−').replace('e', '×10^').replace(/\^\+?(−?\d+)/, '<sup>$1</sup>') : num(x, d);
+  const sigT = (x, d) => sig(x, d).replace(/<sup>(.*?)<\/sup>/, '^$1');
+  const pvTxt = p => !isFinite(p) ? '' : p < 0.0001 ? '< 0.0001' : num(p, 4);
+  const stars = p => p < 0.01 ? '***' : p < 0.05 ? '**' : p < 0.1 ? '*' : '';
+
+  // ---- data preparation ----
+  const RE_STATUS = ['status', 'distress', 'distressed', 'failed', 'failure', 'fail', 'bankrupt', 'bankruptcy', 'default', 'defaulted', 'y', 'label', 'group', 'class', 'outcome'];
+  const reNorm = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const reAutoStatus = cols => cols.find(c => RE_STATUS.includes(reNorm(c))) || '';
+  function reStatus(x) {
+    if (typeof x === 'number') return x === 1 ? 1 : x === 0 ? 0 : NaN;
+    if (typeof x === 'boolean') return x ? 1 : 0;
+    const s = reNorm(x);
+    if (['1', 'yes', 'y', 'true', 'distressed', 'distress', 'failed', 'fail', 'failure', 'bankrupt', 'default', 'defaulted', 'd', 'b', 'f'].includes(s)) return 1;
+    if (['0', 'no', 'n', 'false', 'healthy', 'nondistressed', 'nonfailed', 'nonbankrupt', 'active', 'survivor', 'surviving', 'solvent', 'h', 'nb'].includes(s)) return 0;
+    return NaN;
+  }
+  const reNum = x => {
+    if (x === undefined || x === null || x === '') return NaN; if (typeof x === 'number') return x;
+    let s = String(x).trim().replace(/[\s$€£%]/g, '').replace(/[−–]/g, '-');
+    if (s.includes('.') && s.includes(',')) s = s.lastIndexOf(',') > s.lastIndexOf('.') ? s.replace(/\./g, '').replace(',', '.') : s.replace(/,/g, '');
+    else if (s.includes(',')) s = /^-?\d{1,3}(,\d{3})+$/.test(s) ? s.replace(/,/g, '') : s.replace(',', '.');
+    const n = Number(s); return s === '' ? NaN : n;
+  };
+  const RE_ITEMS = Object.assign({}, BATCH_COLS, {
+    ni: ['netincome', 'ni', 'netprofit', 'profit', 'netincomet'],
+    nip: ['netincomeprev', 'netincomeprevious', 'previousnetincome', 'priornetincome', 'netincomeprioryear', 'netincomelastyear', 'niprev', 'nip', 'netincomet1'],
+    ffo: ['fundsfromoperations', 'ffo', 'operatingcashflow', 'cashflowfromoperations', 'ocf', 'cfo'],
+    gnp: ['gnpindex', 'gnppricelevelindex', 'pricelevelindex', 'gnp', 'deflator']
+  });
+  const RE_ITEM_NAMES = { ta: 'Total Assets', tl: 'Total Liabilities', wc: 'Working Capital (or Current Assets and Current Liabilities)', ca: 'Current Assets', cl: 'Current Liabilities', re: 'Retained Earnings', ebit: 'EBIT', sales: 'Sales', eq: 'Market or Book Value of Equity', ni: 'Net Income', nip: 'Net Income Prev', ffo: 'Funds from Operations' };
+  const both = (a, b, f) => isFinite(a) && isFinite(b) ? f() : NaN;
+  const RE_PRESETS = {
+    altman: { need: ['ta', 'tl', 'wc', 're', 'ebit', 'sales', 'eq'], vars: [
+      ['X1', 'Working capital / Total assets', d => d.wc / d.ta],
+      ['X2', 'Retained earnings / Total assets', d => d.re / d.ta],
+      ['X3', 'EBIT / Total assets', d => d.ebit / d.ta],
+      ['X4', 'Equity / Total liabilities', d => d.eq / d.tl],
+      ['X5', 'Sales / Total assets', d => d.sales / d.ta]] },
+    ohlson: { need: ['ta', 'tl', 'wc', 'ca', 'cl', 'ni', 'nip', 'ffo'], vars: [
+      ['SIZE', 'ln(Total assets / GNP price-level index)', d => Math.log(d.ta / d.gnp)],
+      ['TLTA', 'Total liabilities / Total assets', d => d.tl / d.ta],
+      ['WCTA', 'Working capital / Total assets', d => d.wc / d.ta],
+      ['CLCA', 'Current liabilities / Current assets', d => d.cl / d.ca],
+      ['OENEG', '1 if total liabilities > total assets', d => both(d.tl, d.ta, () => d.tl > d.ta ? 1 : 0)],
+      ['NITA', 'Net income / Total assets', d => d.ni / d.ta],
+      ['FUTL', 'Funds from operations / Total liabilities', d => d.ffo / d.tl],
+      ['INTWO', '1 if net income < 0 in both of the last two years', d => both(d.ni, d.nip, () => d.ni < 0 && d.nip < 0 ? 1 : 0)],
+      ['CHIN', '(NI<sub>t</sub> − NI<sub>t−1</sub>) / (|NI<sub>t</sub>| + |NI<sub>t−1</sub>|)', d => both(d.ni, d.nip, () => (Math.abs(d.ni) + Math.abs(d.nip)) === 0 ? 0 : (d.ni - d.nip) / (Math.abs(d.ni) + Math.abs(d.nip)))]] }
+  };
+  const ORIG = {
+    market: { name: 'Altman Z (1968)', sym: 'Z', w: [1.2, 1.4, 3.3, 0.6, 1.0], cut: 2.675, cutTxt: '2.675 (Altman 1968)' },
+    book: { name: "Altman Z' (private firms)", sym: "Z'", w: [0.717, 0.847, 3.107, 0.420, 0.998], cut: 2.065, cutTxt: '2.065 (midpoint of 1.23 and 2.90)' },
+    ohlson: { name: 'Ohlson O-score (1980)', sym: 'O', b0: -1.32, w: [-0.407, 6.03, -1.43, 0.0757, -1.72, -2.37, -1.83, 0.285, -0.521], cut: 0.5, cutTxt: '50% probability' }
+  };
+
+  function rePrepare(raw, v) {
+    const cols = []; raw.slice(0, 50).forEach(r => Object.keys(r).forEach(k => { if (!cols.includes(k)) cols.push(k); }));
+    const ycol = cols.includes(v.ycol) ? v.ycol : reAutoStatus(cols);
+    if (!ycol) return { error: 'No status column found. Add a column named Status (1 = distressed, 0 = healthy) or choose it under "Status column".' };
+    const map = {}; Object.entries(RE_ITEMS).forEach(([k, al]) => { const hit = cols.find(h => al.includes(reNorm(h))); if (hit) map[k] = hit; });
+    const notes = [];
+    let names, descs, fx, orig = null;
+    if (v.preset === 'custom') {
+      const xs = (Array.isArray(v.xcols) ? v.xcols : []).filter(c => cols.includes(c) && c !== ycol);
+      if (!xs.length) return { error: 'Tick at least one explanatory variable under "Variables to use".' };
+      names = xs; descs = xs.map(() => 'column of your file'); fx = xs.map(c => r => reNum(r[c]));
+    } else {
+      const P = RE_PRESETS[v.preset];
+      const has = k => k === 'wc' ? (map.wc || (map.ca && map.cl)) : k === 'eq' ? (map.mve || map.bve) : map[k];
+      const miss = P.need.filter(k => !has(k));
+      if (miss.length) return { error: 'Your file needs these columns for this preset: ' + miss.map(k => RE_ITEM_NAMES[k]).join(', ') + '. Download the template for the expected names, or use "Choose columns".' };
+      const eqKey = v.x4eq === 'book' ? 'bve' : 'mve', eqAlt = eqKey === 'bve' ? 'mve' : 'bve';
+      if (v.preset === 'altman' && !map[eqKey]) notes.push(`No ${eqKey === 'mve' ? 'market' : 'book'} value of equity column: X4 uses the ${eqKey === 'mve' ? 'book' : 'market'} value instead.`);
+      let gnpWarn = false;
+      fx = P.vars.map(x => x[2]); names = P.vars.map(x => x[0]); descs = P.vars.map(x => x[1]);
+      const item = (r, k) => map[k] ? reNum(r[map[k]]) : NaN;
+      const toD = r => {
+        const d = {}; ['ta', 'tl', 'wc', 'ca', 'cl', 're', 'ebit', 'sales', 'mve', 'bve', 'ni', 'nip', 'ffo', 'gnp'].forEach(k => d[k] = item(r, k));
+        if (!isFinite(d.wc)) d.wc = d.ca - d.cl;
+        d.eq = isFinite(d[eqKey]) ? d[eqKey] : d[eqAlt];
+        if (!isFinite(d.gnp)) { const yr = map.year ? parseInt(r[map.year], 10) : NaN; d.gnp = isFinite(yr) && yr >= 2021 && yr <= 2026 ? gnpIndex(String(yr)) : 100; if (!(isFinite(yr) && yr >= 2021 && yr <= 2026)) gnpWarn = true; }
+        return d;
+      };
+      fx = fx.map(f => r => f(toD(r)));
+      if (v.preset === 'ohlson') {
+        fx.length && raw.forEach(r => toD(r));
+        if (gnpWarn && !map.gnp) notes.push('SIZE: some rows have no GNP Index column and no year between 2021 and 2026, so an index of 100 was used. This only shifts the intercept when all firms share one index, but add a GNP Index column for multi-year samples.');
+      }
+      orig = v.preset === 'ohlson' ? ORIG.ohlson : ORIG[v.x4eq === 'book' ? 'book' : 'market'];
+    }
+    const lab = [], unl = []; let dropped = 0, badY = 0;
+    raw.forEach((r, i) => {
+      const yRaw = r[ycol]; const y = reStatus(yRaw); const x = fx.map(f => f(r));
+      const firm = map.firm ? String(r[map.firm]) : 'Row ' + (i + 2); const year = map.year ? String(r[map.year] ?? '') : '';
+      if (!x.every(isFinite)) { dropped++; return; }
+      if (yRaw === '' || yRaw === null || yRaw === undefined) unl.push({ firm, year, x });
+      else if (isNaN(y)) badY++;
+      else lab.push({ firm, year, x, y });
+    });
+    if (dropped) notes.push(`${dropped} row(s) were skipped because a variable is missing or not a number (for example a zero denominator).`);
+    if (badY) notes.push(`${badY} row(s) were skipped because the status value is not recognised (use 1 / 0).`);
+    // drop constant variables
+    let keep = names.map((_, j) => { const vals = lab.map(o => o.x[j]); return vals.length && Math.max(...vals) - Math.min(...vals) > 1e-12; });
+    const dropV = names.filter((_, j) => !keep[j]);
+    if (dropV.length) notes.push('Dropped because they do not vary in your sample: ' + dropV.join(', ') + '.');
+    const sel = a => a.filter((_, j) => keep[j]);
+    if (orig && dropV.length) orig = Object.assign({}, orig, { keep });
+    lab.forEach(o => { o.xAll = o.x; o.x = sel(o.x); }); unl.forEach(o => { o.xAll = o.x; o.x = sel(o.x); });
+    return { ycol, names: sel(names), descs: sel(descs), lab, unl, notes, orig };
+  }
+
+  // ---- estimation ----
+  function stdz(X) {
+    const p = X[0].length, n = X.length, mu = [], sd = [];
+    for (let j = 0; j < p; j++) { let m = 0; X.forEach(r => m += r[j]); m /= n; let s = 0; X.forEach(r => s += (r[j] - m) ** 2); mu.push(m); sd.push(Math.sqrt(s / (n - 1)) || 1); }
+    const con = sd.map(x => !(x > 1e-12)); con.forEach((c, j) => { if (c) sd[j] = 1; });
+    return { mu, sd, con, f: r => r.map((x, j) => (x - mu[j]) / sd[j]) };
+  }
+  function ldaFit(Xr, y) {
+    const S0 = stdz(Xr), X = Xr.map(S0.f), p = X[0].length;
+    const g = [0, 1].map(c => X.filter((_, i) => y[i] === c)); const n0 = g[0].length, n1 = g[1].length, n = n0 + n1;
+    const mean = G => Array.from({ length: p }, (_, j) => G.reduce((s, r) => s + r[j], 0) / G.length);
+    const m0 = mean(g[0]), m1 = mean(g[1]);
+    const S = Array.from({ length: p }, () => new Array(p).fill(0));
+    [[g[0], m0], [g[1], m1]].forEach(([G, m]) => G.forEach(r => { for (let a = 0; a < p; a++) for (let b = 0; b < p; b++) S[a][b] += (r[a] - m[a]) * (r[b] - m[b]); }));
+    for (let a = 0; a < p; a++) for (let b = 0; b < p; b++) S[a][b] /= (n - 2);
+    // variables that are constant in this fit get a zero coefficient
+    const act = S0.con.map(c => !c), ai = act.map((a, j) => a ? j : -1).filter(j => j >= 0);
+    const Sa = matInv(ai.map(a => ai.map(b => S[a][b]))); if (!Sa) return null;
+    const Si = S.map(() => new Array(p).fill(0)); ai.forEach((a, x) => ai.forEach((b, z) => Si[a][b] = Sa[x][z]));
+    const d = m0.map((x, j) => act[j] ? x - m1[j] : 0);
+    let w = Si.map(row => row.reduce((s, x, j) => s + x * d[j], 0));
+    const D2 = d.reduce((s, x, j) => s + x * w[j], 0);
+    w = w.map(x => x / Math.sqrt(D2));                      // within-group SD of Z = 1
+    const c = w.map((x, j) => x / S0.sd[j]);                 // coefficients on the raw variables (no constant, Altman form)
+    const std = w.map((x, j) => x * Math.sqrt(S[j][j]));     // standardized (pooled within-group SD) coefficients
+    const Z = r => r.reduce((s, x, j) => s + x * c[j], 0);
+    const zs = Xr.map(Z); const zH = zs.filter((_, i) => y[i] === 0), zD = zs.filter((_, i) => y[i] === 1);
+    const cH = zH.reduce((a, b) => a + b, 0) / n0, cD = zD.reduce((a, b) => a + b, 0) / n1;
+    const T2 = n0 * n1 / n * D2, F = (n - p - 1) / (p * (n - 2)) * T2, wilks = 1 / (1 + T2 / (n - 2));
+    return { c, std, Z, zs, cH, cD, mid: (cH + cD) / 2, D2, F, df1: p, df2: n - p - 1, pF: fPval(F, p, n - p - 1), wilks, canon: Math.sqrt(1 - wilks), ziLo: Math.min(...zH), ziHi: Math.max(...zD), n0, n1, S, m0, m1, S0 };
+  }
+  const log1pexp = e => e > 0 ? e + Math.log1p(Math.exp(-e)) : Math.log1p(Math.exp(e));
+  function logitFit(Xr, y, lambda0) {
+    const S0 = stdz(Xr), X = Xr.map(r => [1].concat(S0.f(r))), n = X.length, p = X[0].length;
+    const run = lambda => {
+      const ybar = y.reduce((a, b) => a + b, 0) / n; let b = new Array(p).fill(0); b[0] = Math.log(ybar / (1 - ybar));
+      const llf = bb => { let l = 0; X.forEach((r, i) => { const e = r.reduce((s, x, j) => s + x * bb[j], 0); l += y[i] * e - log1pexp(e); }); for (let j = 1; j < p; j++) l -= lambda / 2 * bb[j] * bb[j]; return l; };
+      let ll = llf(b), conv = false, H = null, it = 0;
+      for (it = 0; it < 100; it++) {
+        const g = new Array(p).fill(0); H = Array.from({ length: p }, () => new Array(p).fill(0));
+        X.forEach((r, i) => { const e = r.reduce((s, x, j) => s + x * b[j], 0), pi = 1 / (1 + Math.exp(-e)), w = pi * (1 - pi); for (let a = 0; a < p; a++) { g[a] += (y[i] - pi) * r[a]; for (let c = a; c < p; c++) H[a][c] += w * r[a] * r[c]; } });
+        for (let a = 0; a < p; a++) for (let c = 0; c < a; c++) H[a][c] = H[c][a];
+        for (let j = 1; j < p; j++) { g[j] -= lambda * b[j]; H[j][j] += lambda + (S0.con[j - 1] ? 1 : 0); }
+        const Hi = matInv(H); if (!Hi) break;
+        const step = Hi.map(row => row.reduce((s, x, j) => s + x * g[j], 0));
+        let t = 1, nb, nll;
+        do { nb = b.map((x, j) => x + t * step[j]); nll = llf(nb); t /= 2; } while (nll < ll - 1e-12 && t > 1e-6);
+        const dl = nll - ll; b = nb; ll = nll;
+        if (Math.abs(dl) < 1e-10 && Math.max(...step.map(Math.abs)) < 1e-6) { conv = true; break; }
+      }
+      return { b, ll, conv, H };
+    };
+    let fit = run(lambda0 || 0), penalized = !!lambda0;
+    const sep = !fit.conv || Math.max(...fit.b.slice(1).map(Math.abs)) > 12;
+    if (sep && !lambda0) { fit = run(1); penalized = true; }
+    const Cov = matInv(fit.H) || fit.H.map(r => r.map(() => NaN));
+    // back to raw-variable coefficients: b_raw = T b, Cov_raw = T Cov T'
+    const T = Array.from({ length: p }, (_, a) => Array.from({ length: p }, (_, c) => a === 0 ? (c === 0 ? 1 : -S0.mu[c - 1] / S0.sd[c - 1]) : (a === c ? 1 / S0.sd[a - 1] : 0)));
+    const braw = T.map(row => row.reduce((s, x, j) => s + x * fit.b[j], 0));
+    const TC = T.map(row => Cov[0].map((_, c) => row.reduce((s, x, k) => s + x * Cov[k][c], 0)));
+    const se = T.map((row, a) => a && S0.con[a - 1] ? NaN : Math.sqrt(row.reduce((s, x, k) => s + TC[a][k] * x, 0)));
+    const z = braw.map((x, j) => x / se[j]), pz = z.map(x => 2 * (1 - F.normCdf(Math.abs(x))));
+    const P = r => 1 / (1 + Math.exp(-(braw[0] + r.reduce((s, x, j) => s + x * braw[j + 1], 0))));
+    const ybar = y.reduce((a, b) => a + b, 0) / n, ll0 = n * (ybar * Math.log(ybar) + (1 - ybar) * Math.log(1 - ybar));
+    let ll = 0; Xr.forEach((r, i) => { const pi = Math.min(1 - 1e-15, Math.max(1e-15, P(r))); ll += y[i] * Math.log(pi) + (1 - y[i]) * Math.log(1 - pi); });
+    const LR = 2 * (ll - ll0);
+    return { b: braw, se, z, pz, std: fit.b.slice(1), P, ll, ll0, LR, pLR: chi2Pval(LR, p - 1), r2: 1 - ll / ll0, aic: -2 * ll + 2 * p, penalized, sep, conv: fit.conv, S0 };
+  }
+
+  // ---- evaluation ----
+  function auc(s, y) {
+    const n1 = y.filter(v => v === 1).length, n0 = y.length - n1; if (!n1 || !n0) return NaN;
+    const idx = s.map((_, i) => i).sort((a, b) => s[a] - s[b]); const rank = new Array(s.length);
+    for (let i = 0; i < idx.length;) { let j = i; while (j + 1 < idx.length && s[idx[j + 1]] === s[idx[i]]) j++; const rr = (i + j) / 2 + 1; for (let k = i; k <= j; k++) rank[idx[k]] = rr; i = j + 1; }
+    let R1 = 0; y.forEach((v, i) => { if (v === 1) R1 += rank[i]; });
+    return (R1 - n1 * (n1 + 1) / 2) / (n1 * n0);
+  }
+  function roc(s, y) {
+    const n1 = y.filter(v => v === 1).length, n0 = y.length - n1; const idx = s.map((_, i) => i).sort((a, b) => s[b] - s[a]);
+    const pts = [{ x: 0, y: 0 }]; let tp = 0, fp = 0;
+    for (let i = 0; i < idx.length;) { let j = i; while (j < idx.length && s[idx[j]] === s[idx[i]]) { if (y[idx[j]] === 1) tp++; else fp++; j++; } pts.push({ x: fp / n0, y: tp / n1 }); i = j; }
+    return pts;
+  }
+  // s: distress score (higher = more likely distressed). Returns the cut c: classify distressed if s >= c.
+  function bestCut(s, y, rule) {
+    const n1 = y.filter(v => v === 1).length, n0 = y.length - n1;
+    const idx = s.map((_, i) => i).sort((a, b) => s[a] - s[b]);
+    let tnBelow = 0, fnBelow = 0, best = -Infinity, cands = [];
+    for (let k = 0; k <= idx.length; k++) {
+      if (k === 0 || k === idx.length || s[idx[k - 1]] < s[idx[k]]) {
+        const c = k === 0 ? s[idx[0]] - 1 : k === idx.length ? s[idx[k - 1]] + 1 : (s[idx[k - 1]] + s[idx[k]]) / 2;
+        const tp = n1 - fnBelow, tn = tnBelow;
+        const m = rule === 'accuracy' ? (tp + tn) / (n0 + n1) : tp / n1 + tn / n0 - 1;
+        if (m > best + 1e-12) { best = m; cands = [c]; } else if (Math.abs(m - best) <= 1e-12) cands.push(c);
+      }
+      if (k < idx.length) { if (y[idx[k]] === 1) fnBelow++; else tnBelow++; }
+    }
+    return cands[Math.floor((cands.length - 1) / 2)];
+  }
+  function evalAt(s, y, c) {
+    let tp = 0, fn = 0, fp = 0, tn = 0; s.forEach((v, i) => { const pd = v >= c; if (y[i] === 1) { if (pd) tp++; else fn++; } else { if (pd) fp++; else tn++; } });
+    const n1 = tp + fn, n0 = fp + tn;
+    return { tp, fn, fp, tn, n: n0 + n1, acc: (tp + tn) / (n0 + n1), t1: n1 ? fn / n1 : NaN, t2: n0 ? fp / n0 : NaN, auc: auc(s, y) };
+  }
+  // fit both models on (X, y) and choose cut-offs on the same data
+  function fitBoth(X, y, rule) {
+    const L = ldaFit(X, y); if (!L) return { error: 'The variables are perfectly collinear in this sample (the covariance matrix cannot be inverted). Remove one of the variables that duplicates another.' };
+    const G = logitFit(X, y);
+    const sL = X.map(r => -L.Z(r)), sG = X.map(G.P);
+    L.cutS = rule === 'conventional' ? -L.mid : bestCut(sL, y, rule); L.cut = -L.cutS;
+    G.cut = rule === 'conventional' ? 0.5 : bestCut(sG, y, rule);
+    return { L, G };
+  }
+  function reSplit(y, frac, k, seed) {
+    const rnd = F.rng(seed), set = y.map(() => 'train'), fold = y.map(() => 0); let ctr = 0;
+    [1, 0].forEach(c => {
+      const idx = y.map((v, i) => v === c ? i : -1).filter(i => i >= 0);
+      for (let i = idx.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); const t = idx[i]; idx[i] = idx[j]; idx[j] = t; }
+      const nt = frac > 0 ? Math.min(idx.length - 2, Math.max(1, Math.round(idx.length * frac))) : 0;
+      idx.forEach((ii, pos) => { if (pos < nt) set[ii] = 'test'; else if (k >= 2) fold[ii] = (ctr++ % k) + 1; });
+    });
+    return { set, fold };
+  }
+  // simulated demo sample (deterministic)
+  let reDemoCache = null;
+  function reDemo() {
+    if (reDemoCache) return reDemoCache;
+    const rnd = F.rng(2026), N = F.normalGen(rnd), cl = (x, a, b) => Math.min(b, Math.max(a, x)), rows = [];
+    const make = (i, d, status) => {
+      const ta = Math.exp((d ? Math.log(55e6) : Math.log(160e6)) + (d ? 1.1 : 1.2) * N());
+      const bl = d ? Math.exp(Math.log(0.42) + 0.75 * N()) - 0.12 : Math.exp(Math.log(0.9) + 0.65 * N());
+      const tl = ta / (1 + Math.max(-0.6, bl));
+      const caR = cl(0.45 + 0.13 * N(), 0.1, 0.9), wcR = d ? 0.01 + 0.16 * N() : 0.11 + 0.14 * N();
+      const ca = caR * ta, cLiab = Math.max(0.03 * ta, ca - wcR * ta);
+      const reR = d ? -0.09 + 0.22 * N() : 0.07 + 0.16 * N();
+      const ebitR = d ? 0.012 + 0.06 * N() : 0.055 + 0.05 * N();
+      const sales = ta * cl((d ? 0.68 : 0.74) + 0.33 * N(), 0.05, 2.5);
+      const mve = tl * Math.exp((d ? Math.log(0.25) : Math.log(0.7)) + 0.8 * N());
+      const ebit = ebitR * ta, pre = ebit - 0.045 * tl, ni = pre > 0 ? 0.76 * pre : pre;
+      const nip = ta * (d ? -0.01 + 0.055 * N() : 0.03 + 0.045 * N());
+      const ffo = ni + ta * (0.03 + 0.012 * N());
+      const r = x => Math.round(x);
+      rows.push({ 'Firm': (status === '' ? 'New firm ' : 'Firm GR-') + String(i).padStart(3, '0'), 'Year': 2021 + Math.floor(rnd() * 5), 'Status': status, 'Total Assets': r(ta), 'Total Liabilities': r(tl), 'Current Assets': r(ca), 'Current Liabilities': r(cLiab), 'Retained Earnings': r(reR * ta), 'EBIT': r(ebit), 'Sales': r(sales), 'Market Value of Equity': r(mve), 'Book Value of Equity': r(ta - tl), 'Net Income': r(ni), 'Net Income Prev': r(nip), 'Funds from Operations': r(ffo) });
+    };
+    for (let i = 1; i <= 150; i++) { const d = i % 3 === 0; make(i, d, d ? 1 : 0); }
+    for (let i = 1; i <= 6; i++) make(i, i % 2 === 0, '');
+    reDemoCache = rows; return rows;
+  }
+
+  TOOLS.push({
+    id: 'reestimate', cat: 'distress', icon: 'lab', title: 'Re-estimate Distress Models on Your Sample', short: 'Re-estimate Weights', isNew: true,
+    desc: 'Estimate country-specific Altman-type (discriminant) and Ohlson-type (logit) weights and cut-offs on your own firms, with cross-validation and a hold-out test.',
+    long: 'Altman\'s weights come from US manufacturers of 1946-1965 and Ohlson\'s from US firms of 1970-1976. Here you estimate the weights on your own sample (for example Greek listed firms): linear discriminant analysis (Altman style) and logit (Ohlson style) side by side. The sample is split into a training set, with k-fold cross-validation for model selection, and a hold-out test set that is used once at the end. Compare the results with the original weights.',
+    inputs: [
+      { id: 'data', label: 'Estimation sample (Excel or CSV)', type: 'file', optional: true, accept: '.xlsx,.xls,.csv',
+        hint: 'One row per firm (or firm-year) with a Status column: 1 = distressed / failed, 0 = healthy. Rows with an empty Status are scored with the estimated models. Amounts in currency units (not millions). Without a file the simulated demo sample is used.',
+        demo: { label: 'Demo sample', name: 'Simulated demo sample (150 firms + 6 unlabeled, not real data)', rows: reDemo, auto: true },
+        template: { name: '4FinanceLab_Reestimation_template.xlsx', columns: ['Firm', 'Year', 'Status', 'Total Assets', 'Total Liabilities', 'Current Assets', 'Current Liabilities', 'Retained Earnings', 'EBIT', 'Sales', 'Market Value of Equity', 'Book Value of Equity', 'Net Income', 'Net Income Prev', 'Funds from Operations', 'GNP Index'],
+          rows: [['Alpha SA', 2024, 0, 1000000, 600000, 450000, 250000, 300000, 150000, 1800000, 1200000, 400000, 90000, 80000, 120000, ''], ['Beta SA', 2024, 1, 500000, 520000, 150000, 210000, -140000, -15000, 400000, 30000, -20000, -45000, -30000, -10000, ''], ['Gamma SA', 2025, '', 800000, 500000, 300000, 200000, 120000, 40000, 900000, 350000, 300000, 20000, 15000, 60000, '']] } },
+      { id: 'ycol', label: 'Status column', type: 'colpick', from: 'data', auto: reAutoStatus, value: '', hint: '1 = distressed, 0 = healthy (also yes / no, failed / healthy). Detected automatically when the column is called Status, Failed, Default, Bankrupt or Distress.' },
+      { id: 'preset', label: 'Variables', type: 'seg', value: 'altman', options: [['altman', "Altman's 5 ratios"], ['ohlson', "Ohlson's 9"], ['custom', 'Choose columns']] },
+      { id: 'x4eq', label: 'Equity in X4', type: 'select', value: 'market', options: [['market', 'Market value (as in Z, listed firms)'], ['book', "Book value (as in Z', private firms)"]], showIf: v => v.preset === 'altman' },
+      { id: 'xcols', label: 'Variables to use', type: 'colpick', multi: true, from: 'data', value: '[]', showIf: v => v.preset === 'custom', hint: 'Ticked columns are used as they are, so compute the ratios in Excel first.' },
+      { id: 'rule', label: 'Cut-off rule', type: 'select', value: 'youden', options: [['youden', 'Balanced: max sensitivity + specificity (Youden)'], ['accuracy', 'Max overall accuracy'], ['conventional', 'Conventional: LDA midpoint, logit 50%']], hint: 'The cut-off is chosen on the data each model is fitted on, never on the validation fold or the test set.' },
+      { id: 'testPct', label: 'Hold-out test set', unit: '% of sample', value: 20, step: 5, min: 0, max: 50, hint: 'Stratified by status. 0 = no test set.' },
+      { id: 'k', label: 'Cross-validation folds k', unit: 'training set', value: 4, step: 1, min: 0, max: 10, hint: '0 = no cross-validation.' },
+      { id: 'seed', label: 'Random seed', value: 42, step: 1, hint: 'Same seed = same split and folds.' }
+    ],
+    compute(v) {
+      const warnings = [];
+      let raw = v.data;
+      if (!(Array.isArray(raw) && raw.length)) { raw = reDemo(); warnings.push('Using the <b>simulated demo sample</b> (150 firms, one third distressed, plus 6 unlabeled firms; not real data). Upload your own Excel or CSV file to estimate the weights for your firms; download the template for the column names.'); }
+      const D = rePrepare(raw, v); if (D.error) return { error: D.error };
+      warnings.push(...D.notes);
+      const lab = D.lab, p = D.names.length;
+      const nD = lab.filter(o => o.y === 1).length, nH = lab.length - nD;
+      if (!p) return { error: 'No usable variables left.' };
+      if (nD < 5 || nH < 5) return { error: `Too few firms: ${nD} distressed and ${nH} healthy with complete data. You need at least 5 of each (and ideally 30 or more).` };
+      const frac = Math.min(0.5, Math.max(0, (isFinite(v.testPct) ? v.testPct : 20) / 100));
+      let k = Math.round(isFinite(v.k) ? v.k : 4); if (k < 2) k = 0; k = Math.min(10, k);
+      const yAll = lab.map(o => o.y); const sp = reSplit(yAll, frac, k, Math.round(v.seed) || 1);
+      lab.forEach((o, i) => { o.set = sp.set[i]; o.fold = sp.fold[i]; });
+      const tr = lab.filter(o => o.set === 'train'), te = lab.filter(o => o.set === 'test');
+      const trD = tr.filter(o => o.y === 1).length, trH = tr.length - trD;
+      if (k && Math.min(trD, trH) < 2 * k) { const k2 = Math.max(0, Math.min(k, Math.floor(Math.min(trD, trH) / 2))); warnings.push(`Only ${Math.min(trD, trH)} firms in the smaller group of the training set, so k was reduced from ${k} to ${k2 < 2 ? 'no cross-validation' : k2}.`); k = k2 < 2 ? 0 : k2; const sp2 = reSplit(yAll, frac, k, Math.round(v.seed) || 1); lab.forEach((o, i) => { o.fold = sp2.fold[i]; }); }
+      if (tr.length <= p + 2) return { error: `The training set (${tr.length} firms) must have more firms than variables (${p}) plus 2. Lower the test share or use fewer variables.` };
+      if (p > Math.min(trD, trH) / 3) warnings.push(`With ${p} variables and only ${Math.min(trD, trH)} firms in the smaller group, the estimates may overfit. A common rule of thumb is at least 10 firms per variable in the smaller group.`);
+
+      // ---- k-fold cross-validation on the training set ----
+      const rule = v.rule || 'youden', cv = [];
+      const oofL = [], oofG = [], oofY = [];
+      for (let f = 1; f <= k; f++) {
+        const fit = tr.filter(o => o.fold !== f), val = tr.filter(o => o.fold === f);
+        const M = fitBoth(fit.map(o => o.x), fit.map(o => o.y), rule); if (M.error) return { error: M.error };
+        const sL = val.map(o => -M.L.Z(o.x)), sG = val.map(o => M.G.P(o.x)), yv = val.map(o => o.y);
+        const eL = evalAt(sL, yv, M.L.cutS), eG = evalAt(sG, yv, M.G.cut);
+        cv.push({ f, n: val.length, nD: yv.filter(x => x === 1).length, eL, eG });
+        sL.forEach((x, i) => { oofL.push(x); oofG.push(sG[i]); oofY.push(yv[i]); });
+      }
+      const avg = a => { const b = a.filter(isFinite); return b.length ? b.reduce((s, x) => s + x, 0) / b.length : NaN; };
+      const cvL = { auc: avg(cv.map(c => c.eL.auc)), acc: avg(cv.map(c => c.eL.acc)), t1: avg(cv.map(c => c.eL.t1)), t2: avg(cv.map(c => c.eL.t2)) };
+      const cvG = { auc: avg(cv.map(c => c.eG.auc)), acc: avg(cv.map(c => c.eG.acc)), t1: avg(cv.map(c => c.eG.t1)), t2: avg(cv.map(c => c.eG.t2)) };
+      const pick = k ? (cvG.auc > cvL.auc + 1e-12 || (Math.abs(cvG.auc - cvL.auc) <= 1e-12 && cvG.acc > cvL.acc) ? 'logit' : 'lda') : null;
+
+      // ---- final fit on the whole training set ----
+      const M = fitBoth(tr.map(o => o.x), tr.map(o => o.y), rule); if (M.error) return { error: M.error };
+      const L = M.L, G = M.G;
+      if (G.penalized) warnings.push('Logit: the groups are (almost) perfectly separated, so maximum-likelihood coefficients do not exist (they tend to infinity). The logit shown uses a small ridge penalty (λ = 1 on standardized variables); standard errors and p-values are omitted. Try fewer variables or a larger sample.');
+      // original weights
+      const O = D.orig;
+      const origScore = O ? (o => { const x = o.xAll; return O.sym === 'O' ? 1 / (1 + Math.exp(-(O.b0 + x.reduce((s, xi, j) => s + xi * O.w[j], 0)))) : -x.reduce((s, xi, j) => s + xi * O.w[j], 0); }) : null;
+      const origCutS = O ? (O.sym === 'O' ? O.cut : -O.cut) : null;
+      // evaluation set: hold-out test set, else training set (in-sample)
+      const evalSet = te.length ? te : tr, evalName = te.length ? 'hold-out test set' : 'training set (in-sample, optimistic)';
+      if (!te.length) warnings.push('No hold-out test set: the results below are in-sample and overstate how well the models classify new firms.');
+      const yE = evalSet.map(o => o.y);
+      const sLE = evalSet.map(o => -L.Z(o.x)), sGE = evalSet.map(o => G.P(o.x)), sOE = O ? evalSet.map(origScore) : null;
+      const eL = evalAt(sLE, yE, L.cutS), eG = evalAt(sGE, yE, G.cut), eO = O ? evalAt(sOE, yE, origCutS) : null;
+      const selName = pick === 'logit' ? 'Logit' : pick === 'lda' ? 'Discriminant (LDA)' : '';
+      const selE = pick === 'logit' ? eG : pick === 'lda' ? eL : null;
+
+      // ---- univariate statistics (training set) ----
+      const trY = tr.map(o => o.y);
+      const univ = D.names.map((nm, j) => {
+        const a = tr.filter(o => o.y === 0).map(o => o.x[j]), b = tr.filter(o => o.y === 1).map(o => o.x[j]);
+        const ma = a.reduce((s, x) => s + x, 0) / a.length, mb = b.reduce((s, x) => s + x, 0) / b.length;
+        const ss = a.reduce((s, x) => s + (x - ma) ** 2, 0) + b.reduce((s, x) => s + (x - mb) ** 2, 0), sp2 = ss / (a.length + b.length - 2);
+        const Fv = (ma - mb) ** 2 / (sp2 * (1 / a.length + 1 / b.length));
+        return [nm, D.descs[j], ma, mb, Fv, fPval(Fv, 1, a.length + b.length - 2)];
+      });
+
+      // ---- tables ----
+      const ow = O ? (O.keep ? O.w.filter((_, j) => O.keep[j]) : O.w) : null;
+      const ldaRows = D.names.map((nm, j) => [nm, D.descs[j], L.c[j], L.std[j]].concat(O && O.sym !== 'O' ? [ow[j]] : []));
+      const ldaCols = [{ h: 'Var', num: false }, { h: 'Description', num: false }, { h: 'Coefficient (your sample)', fmt: x => sigT(x, 4) }, { h: 'Standardized', fmt: x => num(x, 3) }].concat(O && O.sym !== 'O' ? [{ h: 'Original ' + O.sym + ' weight', fmt: x => num(x, 3) }] : []);
+      const blank = O && O.sym !== 'O' ? [''] : [];
+      ldaRows.push(['', '<b>Cut-off</b> (Z below = distressed)', L.cut, ''].concat(O && O.sym !== 'O' ? [O.cut] : []));
+      ldaRows.push(['', 'Group centroid: healthy', L.cH, ''].concat(blank), ['', 'Group centroid: distressed', L.cD, ''].concat(blank));
+      ldaRows.push(['', 'Zone of ignorance (training set)', L.ziLo < L.ziHi ? `${num(L.ziLo, 3)} to ${num(L.ziHi, 3)}` : 'none (groups separated)', ''].concat(blank));
+      const gRows = [['Intercept', 'Constant']].concat(D.names.map((nm, j) => [nm, D.descs[j]])).map((r, j) => r.concat([G.b[j], G.penalized ? '' : G.se[j], G.penalized ? '' : G.z[j], G.penalized ? '' : pvTxt(G.pz[j]) + ' ' + stars(G.pz[j]), j ? Math.exp(G.b[j]) : '', j ? G.std[j - 1] : '']).concat(O && O.sym === 'O' ? [j ? ow[j - 1] : O.b0] : []));
+      const gCols = [{ h: 'Var', num: false }, { h: 'Description', num: false }, { h: 'Coefficient', fmt: x => sigT(x, 4) }, { h: 'Std. error', fmt: x => sigT(x, 4) }, { h: 'z', fmt: x => num(x, 3) }, { h: 'p-value', num: false }, { h: 'Odds ratio', fmt: x => sigT(x, 4) }, { h: 'Standardized', fmt: x => num(x, 3) }].concat(O && O.sym === 'O' ? [{ h: 'Original Ohlson', fmt: x => num(x, 4) }] : []);
+      const fmtE = e => [e.acc, e.t1, e.t2, e.auc];
+      const perfRows = [['Discriminant (LDA)', 'Z < ' + num(L.cut, 3)].concat(fmtE(eL)), ['Logit', 'P ≥ ' + pct(G.cut, 1)].concat(fmtE(eG))];
+      if (O) perfRows.push(['Original ' + O.name, (O.sym === 'O' ? 'P ≥ ' : O.sym + ' < ') + O.cutTxt].concat(fmtE(eO)));
+      const pc = x => pct(x, 1);
+      const perfCols = [{ h: 'Model', num: false }, { h: 'Cut-off', num: false }, { h: 'Accuracy', fmt: pc }, { h: 'Type I error', fmt: pc }, { h: 'Type II error', fmt: pc }, { h: 'AUC', fmt: x => num(x, 3) }];
+      const conf = [['Actual distressed (' + (eL.tp + eL.fn) + ')', eL.tp, eL.fn, eG.tp, eG.fn].concat(O ? [eO.tp, eO.fn] : []), ['Actual healthy (' + (eL.fp + eL.tn) + ')', eL.fp, eL.tn, eG.fp, eG.tn].concat(O ? [eO.fp, eO.tn] : [])];
+      const confCols = [{ h: '', num: false }, { h: 'LDA: pred. distressed', fmt: x => num(x, 0) }, { h: 'LDA: pred. healthy', fmt: x => num(x, 0) }, { h: 'Logit: pred. distressed', fmt: x => num(x, 0) }, { h: 'Logit: pred. healthy', fmt: x => num(x, 0) }].concat(O ? [{ h: 'Original: pred. distressed', fmt: x => num(x, 0) }, { h: 'Original: pred. healthy', fmt: x => num(x, 0) }] : []);
+      const cvRows = cv.map(c => ['Validation fold ' + c.f, `${c.n} (${c.nD} D)`, c.eL.acc, c.eL.auc, c.eG.acc, c.eG.auc]);
+      if (k) cvRows.push(['<b>CV score (average)</b>', `${tr.length} firms`, cvL.acc, cvL.auc, cvG.acc, cvG.auc]);
+      const cvCols = [{ h: '', num: false }, { h: 'Firms', num: false }, { h: 'LDA accuracy', fmt: pc }, { h: 'LDA AUC', fmt: x => num(x, 3) }, { h: 'Logit accuracy', fmt: pc }, { h: 'Logit AUC', fmt: x => num(x, 3) }];
+      const cls = (pd) => pd ? 'Distressed' : 'Healthy';
+      const scored = lab.map(o => ({ o, set: o.set === 'test' ? 'Test' : 'Training', fold: o.set === 'test' ? '' : (o.fold ? String(o.fold) : ''), st: o.y ? '1' : '0' })).concat(D.unl.map(o => ({ o, set: 'Unlabeled', fold: '', st: '' })));
+      const scRows = scored.map(({ o, set, fold, st }) => { const z = L.Z(o.x), pr = G.P(o.x); return [o.firm, o.year, st, set, fold, z, cls(z < L.cut), pr, cls(pr >= G.cut)].concat(O ? [O.sym === 'O' ? origScore(o) : -origScore(o)] : []); });
+      const scCols = [{ h: 'Firm', num: false }, { h: 'Year', num: false }, { h: 'Status', num: false }, { h: 'Set', num: false }, { h: 'Fold', num: false }, { h: 'LDA Z', fmt: x => num(x, 3) }, { h: 'LDA class', num: false }, { h: 'Logit P(distress)', fmt: x => pct(x, 1) }, { h: 'Logit class', num: false }].concat(O ? [{ h: 'Original ' + O.sym, fmt: x => O.sym === 'O' ? pct(x, 1) : num(x, 3) }] : []);
+      const unlN = D.unl.length;
+
+      const sumTxt = `${lab.length} firms: ${nD} distressed, ${nH} healthy`;
+      const kpis = [
+        { k: 'Sample', v: `${lab.length} firms`, s: `${nD} distressed, ${nH} healthy · training ${tr.length}, test ${te.length}${unlN ? ', unlabeled ' + unlN : ''}` },
+        k ? { k: 'CV score (AUC)', v: `${num(cvL.auc, 3)} / ${num(cvG.auc, 3)}`, s: `LDA / logit, average of ${k} validation folds` } : { k: 'Cross-validation', v: 'off', s: 'Set k ≥ 2 to compare the models by CV score' },
+        k ? { k: 'Selected model', v: selName, s: 'Higher CV score (AUC), refitted on the whole training set', cls: 'good' } : null,
+        { k: (te.length ? 'Hold-out test' : 'In-sample') + (selE ? ': ' + (pick === 'logit' ? 'logit' : 'LDA') : ': LDA / logit'), v: selE ? `${pct(selE.acc, 1)} accuracy` : `${pct(eL.acc, 1)} / ${pct(eG.acc, 1)}`, s: selE ? `AUC ${num(selE.auc, 3)} · Type I ${pct(selE.t1, 1)} · Type II ${pct(selE.t2, 1)}` : 'accuracy' },
+        O ? { k: 'Original ' + O.sym + ' on the same firms', v: `${pct(eO.acc, 1)} accuracy`, s: `AUC ${num(eO.auc, 3)} · Type I ${pct(eO.t1, 1)} · cut-off ${O.cutTxt}`, cls: selE ? (eO.acc + 1e-9 < selE.acc ? 'warn' : 'good') : '' } : null
+      ].filter(Boolean);
+
+      const eqTxt = 'Z = ' + D.names.map((nm, j) => (j ? (L.c[j] < 0 ? ' − ' : ' + ') : (L.c[j] < 0 ? '−' : '')) + sig(Math.abs(L.c[j]), 3) + '·' + nm).join('');
+      const pTxt = 'P(distress) = 1 / (1 + e<sup>−y</sup>), &nbsp;y = ' + sig(G.b[0], 3) + D.names.map((nm, j) => (G.b[j + 1] < 0 ? ' − ' : ' + ') + sig(Math.abs(G.b[j + 1]), 3) + '·' + nm).join('');
+      const html = `<div class="panel"><div class="panel-h"><h3>Estimated models (training set, ${tr.length} firms)</h3></div><div class="panel-b">
+        <div class="formula">${eqTxt} &nbsp;&nbsp;→ distressed if Z &lt; ${num(L.cut, 3)}</div>
+        <div class="formula" style="margin-top:8px">${pTxt} &nbsp;&nbsp;→ distressed if P ≥ ${pct(G.cut, 1)}</div>
+        <div class="note" style="margin-top:8px">Like Altman's Z, a higher LDA score means a healthier firm. The logit gives the probability of distress, like Ohlson's O-score. Variables are as defined in your sample (${p} variables).</div></div></div>`;
+
+      // ---- charts ----
+      const rocL = roc(sLE, yE), rocG = roc(sGE, yE), rocO = O ? roc(sOE, yE) : null;
+      const charts = [{
+        id: 'roc', title: 'ROC curves on the ' + evalName, tall: false,
+        note: 'Each curve shows the share of distressed firms caught (true positive rate) against the share of healthy firms flagged (false positive rate) over all cut-offs. AUC = area under the curve (0.5 = coin flip, 1 = perfect).',
+        build: T => ({ type: 'line', data: { datasets: [ds('LDA (AUC ' + num(eL.auc, 3) + ')', rocL, T.c[0], { borderWidth: 2.5, stepped: false }), ds('Logit (AUC ' + num(eG.auc, 3) + ')', rocG, T.c[1], { borderWidth: 2.5 })].concat(O ? [ds('Original ' + O.sym + ' (AUC ' + num(eO.auc, 3) + ')', rocO, T.c[4], { borderWidth: 2, borderDash: [5, 4] })] : []).concat([ds('Random (0.5)', [{ x: 0, y: 0 }, { x: 1, y: 1 }], T.muted, { borderWidth: 1, borderDash: [3, 3] })]) },
+          options: lineOpts(T, { xTitle: 'False positive rate (1 − specificity)', yTitle: 'True positive rate (sensitivity)', xMin: 0, xMax: 1, yMin: 0, yMax: 1, xFmt: x => num(x, 2), yFmt: x => num(x, 2) }) })
+      }];
+      if (k) charts.push({
+        id: 'cvfolds', title: 'Cross-validation: AUC on each validation fold',
+        note: 'Each model is fitted on k − 1 folds of the training set and scored on the held-out validation fold. The CV score is the average over the validation folds: LDA ' + num(cvL.auc, 3) + ', logit ' + num(cvG.auc, 3) + '.',
+        exportData: () => ({ columns: ['Validation fold', 'Firms', 'LDA accuracy', 'LDA AUC', 'Logit accuracy', 'Logit AUC'], rows: cv.map(c => [c.f, c.n, c.eL.acc, c.eL.auc, c.eG.acc, c.eG.auc]) }),
+        build: T => ({ type: 'bar', data: { labels: cv.map(c => 'Fold ' + c.f), datasets: [{ label: 'LDA', data: cv.map(c => c.eL.auc), backgroundColor: T.alpha(T.c[0], .85), borderRadius: 5 }, { label: 'Logit', data: cv.map(c => c.eG.auc), backgroundColor: T.alpha(T.c[1], .85), borderRadius: 5 }] },
+          options: { plugins: { legend: { position: 'bottom' }, tooltip: { callbacks: { label: c => ' ' + c.dataset.label + ': AUC ' + num(c.parsed.y, 3) } } }, scales: { x: { grid: { display: false } }, y: { min: Math.max(0, Math.floor(Math.min(...cv.flatMap(c => [c.eL.auc, c.eG.auc]).filter(isFinite)) * 10 - 1) / 10), max: 1, grid: { color: T.grid } } } } })
+      });
+      // histogram of LDA scores on the training set
+      const zTr = tr.map(o => L.Z(o.x)); const zSorted = zTr.slice().sort((a, b) => a - b);
+      const lo = F.quantileSorted(zSorted, 0.01), hi = F.quantileSorted(zSorted, 0.99), nb = 24, bw = (hi - lo) / nb || 1;
+      const bins = Array.from({ length: nb }, (_, i) => lo + (i + 0.5) * bw);
+      const cnt = c => bins.map((_, i) => tr.filter((o, k2) => o.y === c && Math.min(nb - 1, Math.max(0, Math.floor((zTr[k2] - lo) / bw))) === i).length);
+      const hH = cnt(0), hD = cnt(1);
+      charts.push({
+        id: 'zdist', title: 'LDA score distribution by group (training set)',
+        note: 'Healthy firms should sit to the right of the cut-off and distressed firms to the left. The overlap is the zone where misclassification happens (scores beyond the 1st and 99th percentiles are put in the end bins).',
+        exportData: () => ({ columns: ['Bin centre (Z)', 'Healthy', 'Distressed'], rows: bins.map((b, i) => [b, hH[i], hD[i]]) }),
+        build: T => ({ type: 'bar', data: { datasets: [{ label: 'Healthy', data: bins.map((b, i) => ({ x: b, y: hH[i] })), backgroundColor: T.alpha(T.good, .7), barPercentage: 1, categoryPercentage: 1, grouped: false }, { label: 'Distressed', data: bins.map((b, i) => ({ x: b, y: hD[i] })), backgroundColor: T.alpha(T.bad, .6), barPercentage: 1, categoryPercentage: 1, grouped: false }] },
+          options: { parsing: true, scales: { x: { type: 'linear', offset: false, min: lo, max: hi, title: { display: true, text: 'LDA score Z' }, grid: { color: T.grid }, ticks: { callback: x => num(x, 1) } }, y: { beginAtZero: true, title: { display: true, text: 'Firms' }, grid: { color: T.grid }, ticks: { precision: 0 } } }, plugins: { legend: { position: 'bottom' }, tooltip: { callbacks: { title: it => 'Z ≈ ' + num(it[0].parsed.x, 2), label: c => ' ' + c.dataset.label + ': ' + c.parsed.y } }, vlines: { lines: [{ x: L.cut, color: T.text, label: 'cut-off ' + num(L.cut, 2) }] } } } })
+      });
+      charts.push({
+        id: 'stdcoef', title: 'Relative importance: standardized coefficients',
+        note: 'Coefficients per one standard deviation of each variable, so they are comparable across variables. LDA: positive = healthier. Logit: positive = more likely distressed (opposite sign convention).',
+        exportData: () => ({ columns: ['Variable', 'LDA standardized', 'Logit standardized'], rows: D.names.map((nm, j) => [nm, L.std[j], G.std[j]]) }),
+        build: T => ({ type: 'bar', data: { labels: D.names, datasets: [{ label: 'LDA (+ = healthier)', data: L.std, backgroundColor: T.alpha(T.c[0], .85), borderRadius: 5 }, { label: 'Logit (+ = more distress)', data: G.std, backgroundColor: T.alpha(T.c[1], .85), borderRadius: 5 }] },
+          options: { indexAxis: 'y', plugins: { legend: { position: 'bottom' }, tooltip: { callbacks: { label: c => ' ' + c.dataset.label + ': ' + num(c.parsed.x, 3) } } }, scales: { x: { grid: { color: T.grid } }, y: { grid: { display: false } } } } })
+      });
+
+      const tables = [
+        { id: 'perf', title: 'Classification results on the ' + evalName + ` (${evalSet.length} firms)`, columns: perfCols, rows: perfRows, hl: pick ? [pick === 'logit' ? 1 : 0] : [],
+          note: 'Type I error: a distressed firm classified as healthy (the costly mistake for a lender). Type II error: a healthy firm classified as distressed. ' + (te.length ? 'The test set was not used for estimation, cut-offs or model selection.' : '') + (O ? ' The original model uses its published weights and cut-off, with no re-estimation.' : '') },
+        { id: 'confusion', title: 'Confusion matrices (' + evalName + ')', columns: confCols, rows: conf },
+        { id: 'lda', title: 'Discriminant function (LDA), estimated on the training set', columns: ldaCols, rows: ldaRows, hl: [p],
+          note: `Wilks' Λ = ${num(L.wilks, 4)}, F(${L.df1}, ${L.df2}) = ${num(L.F, 3)}, p ${L.pF < 0.0001 ? '< 0.0001' : '= ' + num(L.pF, 4)}; canonical correlation ${num(L.canon, 3)}; Mahalanobis D² = ${num(L.D2, 3)}. Coefficients are scaled so that the within-group standard deviation of Z is 1 (no constant, as in Altman's Z).` },
+        { id: 'logit', title: 'Logit model, estimated on the training set', columns: gCols, rows: gRows,
+          note: `Log-likelihood ${num(G.ll, 3)} (null ${num(G.ll0, 3)}); LR χ²(${p}) = ${num(G.LR, 3)}, p ${G.pLR < 0.0001 ? '< 0.0001' : '= ' + num(G.pLR, 4)}; McFadden R² = ${num(G.r2, 3)}; AIC = ${num(G.aic, 2)}. *** p &lt; 0.01, ** p &lt; 0.05, * p &lt; 0.1. Odds ratio = change in the odds of distress for a one-unit increase in the variable.` + (G.penalized ? ' Ridge-penalized estimates (separation).' : '') },
+        { id: 'univ', title: 'Variable means by group and univariate F-tests (training set)', columns: [{ h: 'Var', num: false }, { h: 'Description', num: false }, { h: 'Mean healthy', fmt: x => num(x, 4) }, { h: 'Mean distressed', fmt: x => num(x, 4) }, { h: 'F(1, n−2)', fmt: x => num(x, 2) }, { h: 'p-value', fmt: pvTxt }], rows: univ,
+          note: 'As in Altman (1968, Table 1): a large F means the variable separates the two groups well on its own.' }
+      ];
+      if (k) tables.splice(2, 0, { id: 'cv', title: `${k}-fold cross-validation on the training set`, columns: cvCols, rows: cvRows, hl: [cvRows.length - 1], note: 'Each validation fold is scored by models fitted on the other ' + (k - 1) + ' folds (cut-offs chosen on those folds). The model with the higher CV score (AUC) is selected and then refitted on the whole training set.' });
+      tables.push({ id: 'scored', title: `Scored firms (${scRows.length}${unlN ? ', including ' + unlN + ' unlabeled' : ''})`, columns: scCols, rows: scRows,
+        note: 'Scores from the final models fitted on the training set. Fold = the validation fold the firm belonged to in cross-validation. Unlabeled firms (empty Status) are classified with the estimated cut-offs.' });
+
+      const steps = [
+        { h: '1. Sample and split', f: [`Hold-out test set: ${pct(frac, 0)} of the firms, drawn at random within each group (stratified), seed ${Math.round(v.seed) || 1}. It is used once, at the end.`, `Training set: the remaining ${tr.length} firms` + (k ? `, split into ${k} folds (stratified).` : '.')], calc: `${sumTxt}\nTraining: ${tr.length} (${trD} distressed) · Test: ${te.length} (${te.filter(o => o.y === 1).length} distressed)${unlN ? ' · Unlabeled: ' + unlN : ''}` },
+        { h: '2. Discriminant analysis (Fisher LDA, Altman style)', f: ['c = S<sub>W</sub><sup>−1</sup> (x̄<sub>healthy</sub> − x̄<sub>distressed</sub>), scaled so that the within-group SD of Z is 1', 'Z = c<sub>1</sub>X<sub>1</sub> + … + c<sub>p</sub>X<sub>p</sub>; conventional cut-off = midpoint of the two group centroids'], calc: eqTxt.replace(/<sup>(.*?)<\/sup>/g, '^$1') + `\nCentroids: healthy ${num(L.cH, 3)}, distressed ${num(L.cD, 3)} → midpoint ${num(L.mid, 3)}; cut-off used ${num(L.cut, 3)}`, note: 'S<sub>W</sub> is the pooled within-group covariance matrix of the variables.' },
+        { h: '3. Logit (maximum likelihood, Ohlson style)', f: ['P(distress) = 1 / (1 + e<sup>−(b<sub>0</sub> + b<sub>1</sub>X<sub>1</sub> + … + b<sub>p</sub>X<sub>p</sub>)</sup>)', 'b maximizes ln L = Σ [y<sub>i</sub> ln P<sub>i</sub> + (1 − y<sub>i</sub>) ln(1 − P<sub>i</sub>)] (Newton-Raphson)'], calc: pTxt.replace(/&nbsp;/g, ' ').replace(/<sup>(.*?)<\/sup>/g, '^($1)').replace(/<[^>]+>/g, '') + `\nCut-off used ${pct(G.cut, 2)}` },
+        { h: '4. Cut-off rule', f: [rule === 'youden' ? 'Choose the cut-off that maximizes sensitivity + specificity − 1 (Youden J), on the data the model was fitted on' : rule === 'accuracy' ? 'Choose the cut-off that maximizes overall accuracy on the data the model was fitted on' : 'LDA: midpoint of the group centroids (equal priors and costs). Logit: P = 50%.'], note: 'With unequal group sizes the balanced (Youden) rule avoids a cut-off that simply labels every firm healthy.' },
+        k ? { h: '5. k-fold cross-validation (training set only)', f: ['For each fold j = 1…k: fit on the other k − 1 folds, score validation fold j', 'CV score = average of the k validation-fold scores; select the model with the higher CV AUC; refit it on the whole training set'], calc: `LDA: CV AUC ${num(cvL.auc, 4)}, CV accuracy ${pct(cvL.acc, 2)}\nLogit: CV AUC ${num(cvG.auc, 4)}, CV accuracy ${pct(cvG.acc, 2)}\nSelected: ${selName}` } : null,
+        { h: (k ? '6' : '5') + '. Final evaluation on the ' + evalName, f: ['Accuracy = (TP + TN) / n; Type I error = FN / distressed; Type II error = FP / healthy', 'AUC = P(score of a random distressed firm > score of a random healthy firm)'], calc: `LDA: accuracy ${pct(eL.acc, 2)}, Type I ${pct(eL.t1, 2)}, Type II ${pct(eL.t2, 2)}, AUC ${num(eL.auc, 4)}\nLogit: accuracy ${pct(eG.acc, 2)}, Type I ${pct(eG.t1, 2)}, Type II ${pct(eG.t2, 2)}, AUC ${num(eG.auc, 4)}` + (O ? `\nOriginal ${O.sym}: accuracy ${pct(eO.acc, 2)}, Type I ${pct(eO.t1, 2)}, Type II ${pct(eO.t2, 2)}, AUC ${num(eO.auc, 4)}` : '') }
+      ].filter(Boolean);
+      return { warnings, kpis, html, charts, tables, steps,
+        refs: 'Fisher, R. A. (1936). The use of multiple measurements in taxonomic problems. <i>Annals of Eugenics</i>, 7(2). Altman, E. I. (1968). Financial ratios, discriminant analysis and the prediction of corporate bankruptcy. <i>Journal of Finance</i>, 23(4). Ohlson, J. A. (1980). Financial ratios and the probabilistic prediction of bankruptcy. <i>Journal of Accounting Research</i>, 18(1). Altman, E. I., Iwanicz-Drozdowska, M., Laitinen, E. K. and Suvas, A. (2017). Financial distress prediction in an international context: a review and empirical analysis of Altman\'s Z-score model. <i>Journal of International Financial Management &amp; Accounting</i>, 28(2). Hanley, J. A. and McNeil, B. J. (1982). The meaning and use of the area under a ROC curve. <i>Radiology</i>, 143(1).' };
     }
   });
 
