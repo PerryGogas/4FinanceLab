@@ -174,7 +174,7 @@
   let companyDB = null;
   async function loadDB() {
     if (companyDB) return companyDB;
-    try { companyDB = await fetch('data/companies.json?v=2.3.0').then(r => r.json()); } catch (e) { companyDB = []; }
+    try { companyDB = await fetch('data/companies.json?v=2.4.1').then(r => r.json()); } catch (e) { companyDB = []; }
     return companyDB;
   }
   const coRow = a => { const o = {}; CO_FIELDS.forEach((f, k) => { o[f] = k === 0 ? a[0] : (a[k] == null ? null : a[k] * 1e6); }); return o; };
