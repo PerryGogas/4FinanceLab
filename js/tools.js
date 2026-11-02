@@ -1353,6 +1353,120 @@
     });
     return { set, fold };
   }
+  // ---- machine learning: random forest and XGBoost-style gradient boosting (trees on the raw ratios) ----
+  // tree node: leaf {v, n} or split {f, t, l, r, v, n}; n = training samples reaching the node (cover, used by TreeSHAP)
+  function growTree(X, idx, opt, rnd, leafVal, gainOf) {
+    const p = X[0].length;
+    const node = (ids, depth) => {
+      const nd = { n: ids.length, v: leafVal(ids) };
+      if (depth >= opt.maxDepth || ids.length < 2 * opt.minLeaf) return nd;
+      let feats = Array.from({ length: p }, (_, j) => j);
+      if (opt.mtry && opt.mtry < p) { for (let i = p - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); const t = feats[i]; feats[i] = feats[j]; feats[j] = t; } feats = feats.slice(0, opt.mtry); }
+      let best = null;
+      for (const f of feats) {
+        const s = ids.slice().sort((a, b) => X[a][f] - X[b][f]);
+        const g = gainOf(s);
+        for (let k = 1; k < opt.minLeaf; k++) g.add(s[k - 1]);
+        for (let k = opt.minLeaf; k <= s.length - opt.minLeaf; k++) {
+          const lo = X[s[k - 1]][f], hi = X[s[k]][f];
+          g.add(s[k - 1]);
+          if (hi <= lo) continue;
+          const gain = g.gain(); if (gain === null) continue;
+          if (!best || gain > best.gain + 1e-12) best = { gain, f, t: (lo + hi) / 2, k, s };
+        }
+      }
+      if (!best || !(best.gain > 1e-12)) return nd;
+      nd.f = best.f; nd.t = best.t;
+      nd.l = node(best.s.slice(0, best.k), depth + 1); nd.r = node(best.s.slice(best.k), depth + 1);
+      return nd;
+    };
+    return node(idx, 0);
+  }
+  const treeVal = (nd, x) => { while (nd.l) nd = x[nd.f] <= nd.t ? nd.l : nd.r; return nd.v; };
+  function rfFit(X, y, seed, rule) {
+    const n = X.length, p = X[0].length, rnd = F.rng(seed * 7919 + 17), T = 200;
+    const opt = { maxDepth: 12, minLeaf: 2, mtry: Math.max(1, Math.round(Math.sqrt(p))) };
+    const leafVal = ids => ids.reduce((s, i) => s + y[i], 0) / ids.length;
+    const gini = s => { let n1 = s.reduce((a, i) => a + y[i], 0), N = s.length, l = 0, l1 = 0; const base = N - (n1 * n1 + (N - n1) * (N - n1)) / N;
+      return { add: i => { l++; l1 += y[i]; }, gain: () => { const r = N - l, r1 = n1 - l1; const wl = l - (l1 * l1 + (l - l1) * (l - l1)) / l, wr = r - (r1 * r1 + (r - r1) * (r - r1)) / r; return base - wl - wr; } }; };
+    const trees = [], oobSum = new Array(n).fill(0), oobCnt = new Array(n).fill(0);
+    for (let t = 0; t < T; t++) {
+      const idx = Array.from({ length: n }, () => Math.floor(rnd() * n)), inb = new Uint8Array(n); idx.forEach(i => inb[i] = 1);
+      const tree = growTree(X, idx, opt, rnd, leafVal, gini); trees.push(tree);
+      for (let i = 0; i < n; i++) if (!inb[i]) { oobSum[i] += treeVal(tree, X[i]); oobCnt[i]++; }
+    }
+    const P = x => trees.reduce((s, tr) => s + treeVal(tr, x), 0) / T;
+    // the cut-off is chosen on out-of-bag probabilities (in-sample forest probabilities are overfitted)
+    const oob = X.map((x, i) => oobCnt[i] ? oobSum[i] / oobCnt[i] : P(x));
+    return { trees, P, cut: rule === 'conventional' ? 0.5 : bestCut(oob, y, rule), T, opt, space: 'probability' };
+  }
+  function gbCore(X, y, seed) {
+    const n = X.length, rnd = F.rng(seed * 104729 + 3), R = 150, lr = 0.1, lambda = 1, mcw = 1;
+    const opt = { maxDepth: 3, minLeaf: 2, mtry: 0 };
+    const ybar = Math.min(0.99, Math.max(0.01, y.reduce((a, b) => a + b, 0) / n)), f0 = Math.log(ybar / (1 - ybar));
+    const Fx = new Array(n).fill(f0), trees = [];
+    for (let m = 0; m < R; m++) {
+      const g = new Array(n), h = new Array(n);
+      for (let i = 0; i < n; i++) { const pi = 1 / (1 + Math.exp(-Fx[i])); g[i] = pi - y[i]; h[i] = Math.max(pi * (1 - pi), 1e-6); }
+      const idx = []; for (let i = 0; i < n; i++) if (rnd() < 0.8) idx.push(i);
+      const leafVal = ids => { let G = 0, H = 0; ids.forEach(i => { G += g[i]; H += h[i]; }); return -lr * G / (H + lambda); };
+      const xgain = s => { let G = 0, H = 0; s.forEach(i => { G += g[i]; H += h[i]; }); const base = G * G / (H + lambda); let GL = 0, HL = 0;
+        return { add: i => { GL += g[i]; HL += h[i]; }, gain: () => { const GR = G - GL, HR = H - HL; if (HL < mcw || HR < mcw) return null; return 0.5 * (GL * GL / (HL + lambda) + GR * GR / (HR + lambda) - base); } }; };
+      const tree = growTree(X, idx, opt, rnd, leafVal, xgain); trees.push(tree);
+      for (let i = 0; i < n; i++) Fx[i] += treeVal(tree, X[i]);
+    }
+    const margin = x => trees.reduce((s, tr) => s + treeVal(tr, x), f0);
+    return { trees, f0, margin, P: x => 1 / (1 + Math.exp(-margin(x))), R, lr, lambda, opt };
+  }
+  function gbFit(X, y, seed, rule) {
+    const B = gbCore(X, y, seed);
+    B.space = 'log-odds';
+    if (rule === 'conventional') { B.cut = 0.5; return B; }
+    // the cut-off is chosen on out-of-fold probabilities from an inner 3-fold split of the same data
+    const sp = reSplit(y, 0, 3, seed + 101), oof = new Array(y.length);
+    for (let f = 1; f <= 3; f++) {
+      const tri = y.map((_, i) => i).filter(i => sp.fold[i] !== f), vai = y.map((_, i) => i).filter(i => sp.fold[i] === f);
+      const Bf = gbCore(tri.map(i => X[i]), tri.map(i => y[i]), seed + f);
+      vai.forEach(i => oof[i] = Bf.P(X[i]));
+    }
+    B.cut = bestCut(oof, y, rule);
+    return B;
+  }
+  // ---- TreeSHAP (Lundberg, Erion and Lee 2018, path-dependent algorithm): exact Shapley values for one tree ----
+  function treeShap(root, x, phi, scale) {
+    const extend = (m, pz, po, pi) => {
+      const l = m.length; m = m.map(e => e.slice()); m.push([pi, pz, po, l === 0 ? 1 : 0]);
+      for (let i = l - 1; i >= 0; i--) { m[i + 1][3] += po * m[i][3] * (i + 1) / (l + 1); m[i][3] = pz * m[i][3] * (l - i) / (l + 1); }
+      return m;
+    };
+    const unwind = (m, i) => {
+      m = m.map(e => e.slice()); const l = m.length - 1, o = m[i][2], z = m[i][1]; let nn = m[l][3];
+      for (let j = l - 1; j >= 0; j--) {
+        if (o !== 0) { const t = m[j][3]; m[j][3] = nn * (l + 1) / ((j + 1) * o); nn = t - m[j][3] * z * (l - j) / (l + 1); }
+        else m[j][3] = m[j][3] * (l + 1) / (z * (l - j));
+      }
+      for (let j = i; j < l; j++) { m[j][0] = m[j + 1][0]; m[j][1] = m[j + 1][1]; m[j][2] = m[j + 1][2]; }
+      m.pop(); return m;
+    };
+    const rec = (nd, m, pz, po, pi) => {
+      m = extend(m, pz, po, pi);
+      if (!nd.l) {
+        for (let i = 1; i < m.length; i++) { const w = unwind(m, i).reduce((s, e) => s + e[3], 0); phi[m[i][0]] += scale * w * (m[i][2] - m[i][1]) * nd.v; }
+        return;
+      }
+      const hot = x[nd.f] <= nd.t ? nd.l : nd.r, cold = hot === nd.l ? nd.r : nd.l;
+      let iz = 1, io = 1; const k = m.findIndex((e, j) => j > 0 && e[0] === nd.f);
+      if (k > 0) { iz = m[k][1]; io = m[k][2]; m = unwind(m, k); }
+      rec(hot, m, iz * hot.n / nd.n, io, nd.f);
+      rec(cold, m, iz * cold.n / nd.n, 0, nd.f);
+    };
+    rec(root, [], 1, 1, -1);
+  }
+  const treeMean = nd => !nd.l ? nd.v : (nd.l.n * treeMean(nd.l) + nd.r.n * treeMean(nd.r)) / nd.n;
+  // SHAP values of every row: RF in probability units, gradient boosting in log-odds units; base + sum(phi) = model output
+  function shapRF(R, X) { const p = X[0].length; return { base: R.trees.reduce((s, t) => s + treeMean(t), 0) / R.T, phi: X.map(x => { const phi = new Array(p).fill(0); R.trees.forEach(t => treeShap(t, x, phi, 1 / R.T)); return phi; }) }; }
+  function shapGB(B, X) { const p = X[0].length; return { base: B.trees.reduce((s, t) => s + treeMean(t), B.f0), phi: X.map(x => { const phi = new Array(p).fill(0); B.trees.forEach(t => treeShap(t, x, phi, 1)); return phi; }) }; }
+
   // simulated demo sample (deterministic)
   let reDemoCache = null;
   function reDemo() {
@@ -1381,8 +1495,8 @@
 
   TOOLS.push({
     id: 'reestimate', cat: 'distress', icon: 'lab', title: 'Re-estimate Distress Models on Your Sample', short: 'Re-estimate Weights', isNew: true,
-    desc: 'Estimate country-specific Altman-type (discriminant) and Ohlson-type (logit) weights and cut-offs on your own firms, with cross-validation and a hold-out test.',
-    long: 'Altman\'s weights come from US manufacturers of 1946-1965 and Ohlson\'s from US firms of 1970-1976. Here you estimate the weights on your own sample (for example Greek listed firms): linear discriminant analysis (Altman style) and logit (Ohlson style) side by side. The sample is split into a training set, with k-fold cross-validation for model selection, and a hold-out test set that is used once at the end. Compare the results with the original weights.',
+    desc: 'Estimate country-specific Altman-type (discriminant) and Ohlson-type (logit) weights on your own firms, compare them with random forest and gradient boosting, and explain the models with SHAP.',
+    long: 'Altman\'s weights come from US manufacturers of 1946-1965 and Ohlson\'s from US firms of 1970-1976. Here you estimate the weights on your own sample (for example Greek listed firms): linear discriminant analysis (Altman style) and logit (Ohlson style), compared with two machine learning models, random forest and XGBoost-style gradient boosting, explained with SHAP values. The sample is split into a training set, with k-fold cross-validation for model selection, and a hold-out test set that is used once at the end. Compare the results with the original weights.',
     inputs: [
       { id: 'data', label: 'Estimation sample (Excel or CSV)', type: 'file', optional: true, accept: '.xlsx,.xls,.csv',
         hint: 'One row per firm (or firm-year) with a Status column: 1 = distressed / failed, 0 = healthy. Rows with an empty Status are scored with the estimated models. Amounts in currency units (not millions). Without a file the simulated demo sample is used.',
@@ -1394,6 +1508,7 @@
       { id: 'x4eq', label: 'Equity in X4', type: 'select', value: 'market', options: [['market', 'Market value (as in Z, listed firms)'], ['book', "Book value (as in Z', private firms)"]], showIf: v => v.preset === 'altman' },
       { id: 'xcols', label: 'Variables to use', type: 'colpick', multi: true, from: 'data', value: '[]', showIf: v => v.preset === 'custom', hint: 'Ticked columns are used as they are, so compute the ratios in Excel first.' },
       { id: 'rule', label: 'Cut-off rule', type: 'select', value: 'youden', options: [['youden', 'Balanced: max sensitivity + specificity (Youden)'], ['accuracy', 'Max overall accuracy'], ['conventional', 'Conventional: LDA midpoint, logit 50%']], hint: 'The cut-off is chosen on the data each model is fitted on, never on the validation fold or the test set.' },
+      { id: 'ml', label: 'Models', type: 'select', value: 'on', options: [['on', 'LDA, logit, random forest and gradient boosting'], ['off', 'LDA and logit only (faster)']], hint: 'Random forest and gradient boosting (XGBoost-style) predict distress without coefficients; SHAP values show which ratios drive them.' },
       { id: 'testPct', label: 'Hold-out test set', unit: '% of sample', value: 20, step: 5, min: 0, max: 50, hint: 'Stratified by status. 0 = no test set.' },
       { id: 'k', label: 'Cross-validation folds k', unit: 'training set', value: 4, step: 1, min: 0, max: 10, hint: '0 = no cross-validation.' },
       { id: 'seed', label: 'Random seed', value: 42, step: 1, hint: 'Same seed = same split and folds.' }
@@ -1404,55 +1519,73 @@
       if (!(Array.isArray(raw) && raw.length)) { raw = reDemo(); warnings.push('Using the <b>simulated demo sample</b> (150 firms, one third distressed, plus 6 unlabeled firms; not real data). Upload your own Excel or CSV file to estimate the weights for your firms; download the template for the column names.'); }
       const D = rePrepare(raw, v); if (D.error) return { error: D.error };
       warnings.push(...D.notes);
-      const lab = D.lab, p = D.names.length;
+      const lab = D.lab, p = D.names.length, ml = v.ml !== 'off';
       const nD = lab.filter(o => o.y === 1).length, nH = lab.length - nD;
       if (!p) return { error: 'No usable variables left.' };
       if (nD < 5 || nH < 5) return { error: `Too few firms: ${nD} distressed and ${nH} healthy with complete data. You need at least 5 of each (and ideally 30 or more).` };
       const frac = Math.min(0.5, Math.max(0, (isFinite(v.testPct) ? v.testPct : 20) / 100));
       let k = Math.round(isFinite(v.k) ? v.k : 4); if (k < 2) k = 0; k = Math.min(10, k);
-      const yAll = lab.map(o => o.y); const sp = reSplit(yAll, frac, k, Math.round(v.seed) || 1);
+      const seed = Math.round(v.seed) || 1;
+      const yAll = lab.map(o => o.y); const sp = reSplit(yAll, frac, k, seed);
       lab.forEach((o, i) => { o.set = sp.set[i]; o.fold = sp.fold[i]; });
       const tr = lab.filter(o => o.set === 'train'), te = lab.filter(o => o.set === 'test');
       const trD = tr.filter(o => o.y === 1).length, trH = tr.length - trD;
-      if (k && Math.min(trD, trH) < 2 * k) { const k2 = Math.max(0, Math.min(k, Math.floor(Math.min(trD, trH) / 2))); warnings.push(`Only ${Math.min(trD, trH)} firms in the smaller group of the training set, so k was reduced from ${k} to ${k2 < 2 ? 'no cross-validation' : k2}.`); k = k2 < 2 ? 0 : k2; const sp2 = reSplit(yAll, frac, k, Math.round(v.seed) || 1); lab.forEach((o, i) => { o.fold = sp2.fold[i]; }); }
+      if (k && Math.min(trD, trH) < 2 * k) { const k2 = Math.max(0, Math.min(k, Math.floor(Math.min(trD, trH) / 2))); warnings.push(`Only ${Math.min(trD, trH)} firms in the smaller group of the training set, so k was reduced from ${k} to ${k2 < 2 ? 'no cross-validation' : k2}.`); k = k2 < 2 ? 0 : k2; const sp2 = reSplit(yAll, frac, k, seed); lab.forEach((o, i) => { o.fold = sp2.fold[i]; }); }
       if (tr.length <= p + 2) return { error: `The training set (${tr.length} firms) must have more firms than variables (${p}) plus 2. Lower the test share or use fewer variables.` };
       if (p > Math.min(trD, trH) / 3) warnings.push(`With ${p} variables and only ${Math.min(trD, trH)} firms in the smaller group, the estimates may overfit. A common rule of thumb is at least 10 firms per variable in the smaller group.`);
 
+      // the models: distress score s(x) (higher = more likely distressed) and its cut-off cutS
+      const MODELS = [
+        { key: 'lda', name: 'Discriminant (LDA)', short: 'LDA', col: 0 },
+        { key: 'logit', name: 'Logit', short: 'Logit', col: 1 }
+      ].concat(ml ? [{ key: 'rf', name: 'Random forest', short: 'RF', col: 2 }, { key: 'gb', name: 'Gradient boosting (XGBoost-style)', short: 'GB', col: 3 }] : []);
+      const fitAll = (X, y, s) => {
+        const M = fitBoth(X, y, rule); if (M.error) return M;
+        const out = { lda: { m: M.L, s: x => -M.L.Z(x), cutS: M.L.cutS }, logit: { m: M.G, s: M.G.P, cutS: M.G.cut } };
+        if (ml) { const R = rfFit(X, y, s, rule), B = gbFit(X, y, s, rule); out.rf = { m: R, s: R.P, cutS: R.cut }; out.gb = { m: B, s: B.P, cutS: B.cut }; }
+        return out;
+      };
+
       // ---- k-fold cross-validation on the training set ----
       const rule = v.rule || 'youden', cv = [];
-      const oofL = [], oofG = [], oofY = [];
       for (let f = 1; f <= k; f++) {
         const fit = tr.filter(o => o.fold !== f), val = tr.filter(o => o.fold === f);
-        const M = fitBoth(fit.map(o => o.x), fit.map(o => o.y), rule); if (M.error) return { error: M.error };
-        const sL = val.map(o => -M.L.Z(o.x)), sG = val.map(o => M.G.P(o.x)), yv = val.map(o => o.y);
-        const eL = evalAt(sL, yv, M.L.cutS), eG = evalAt(sG, yv, M.G.cut);
-        cv.push({ f, n: val.length, nD: yv.filter(x => x === 1).length, eL, eG });
-        sL.forEach((x, i) => { oofL.push(x); oofG.push(sG[i]); oofY.push(yv[i]); });
+        const M = fitAll(fit.map(o => o.x), fit.map(o => o.y), seed + f); if (M.error) return { error: M.error };
+        const yv = val.map(o => o.y), e = {};
+        MODELS.forEach(md => { e[md.key] = evalAt(val.map(o => M[md.key].s(o.x)), yv, M[md.key].cutS); });
+        cv.push({ f, n: val.length, nD: yv.filter(x => x === 1).length, e });
       }
       const avg = a => { const b = a.filter(isFinite); return b.length ? b.reduce((s, x) => s + x, 0) / b.length : NaN; };
-      const cvL = { auc: avg(cv.map(c => c.eL.auc)), acc: avg(cv.map(c => c.eL.acc)), t1: avg(cv.map(c => c.eL.t1)), t2: avg(cv.map(c => c.eL.t2)) };
-      const cvG = { auc: avg(cv.map(c => c.eG.auc)), acc: avg(cv.map(c => c.eG.acc)), t1: avg(cv.map(c => c.eG.t1)), t2: avg(cv.map(c => c.eG.t2)) };
-      const pick = k ? (cvG.auc > cvL.auc + 1e-12 || (Math.abs(cvG.auc - cvL.auc) <= 1e-12 && cvG.acc > cvL.acc) ? 'logit' : 'lda') : null;
+      const cvS = {}; MODELS.forEach(md => { cvS[md.key] = { auc: avg(cv.map(c => c.e[md.key].auc)), acc: avg(cv.map(c => c.e[md.key].acc)) }; });
+      let pick = null;
+      if (k) MODELS.forEach(md => { const a = cvS[md.key], b = pick && cvS[pick]; if (!b || a.auc > b.auc + 1e-12 || (Math.abs(a.auc - b.auc) <= 1e-12 && a.acc > b.acc)) pick = md.key; });
+      const nameOf = key => MODELS.find(md => md.key === key).name;
 
       // ---- final fit on the whole training set ----
-      const M = fitBoth(tr.map(o => o.x), tr.map(o => o.y), rule); if (M.error) return { error: M.error };
-      const L = M.L, G = M.G;
+      const FM = fitAll(tr.map(o => o.x), tr.map(o => o.y), seed); if (FM.error) return { error: FM.error };
+      const L = FM.lda.m, G = FM.logit.m;
       if (G.penalized) warnings.push('Logit: the groups are (almost) perfectly separated, so maximum-likelihood coefficients do not exist (they tend to infinity). The logit shown uses a small ridge penalty (λ = 1 on standardized variables); standard errors and p-values are omitted. Try fewer variables or a larger sample.');
-      // original weights
       const O = D.orig;
       const origScore = O ? (o => { const x = o.xAll; return O.sym === 'O' ? 1 / (1 + Math.exp(-(O.b0 + x.reduce((s, xi, j) => s + xi * O.w[j], 0)))) : -x.reduce((s, xi, j) => s + xi * O.w[j], 0); }) : null;
       const origCutS = O ? (O.sym === 'O' ? O.cut : -O.cut) : null;
-      // evaluation set: hold-out test set, else training set (in-sample)
       const evalSet = te.length ? te : tr, evalName = te.length ? 'hold-out test set' : 'training set (in-sample, optimistic)';
-      if (!te.length) warnings.push('No hold-out test set: the results below are in-sample and overstate how well the models classify new firms.');
-      const yE = evalSet.map(o => o.y);
-      const sLE = evalSet.map(o => -L.Z(o.x)), sGE = evalSet.map(o => G.P(o.x)), sOE = O ? evalSet.map(origScore) : null;
-      const eL = evalAt(sLE, yE, L.cutS), eG = evalAt(sGE, yE, G.cut), eO = O ? evalAt(sOE, yE, origCutS) : null;
-      const selName = pick === 'logit' ? 'Logit' : pick === 'lda' ? 'Discriminant (LDA)' : '';
-      const selE = pick === 'logit' ? eG : pick === 'lda' ? eL : null;
+      if (!te.length) warnings.push('No hold-out test set: the results below are in-sample and overstate how well the models classify new firms' + (ml ? ' (random forest and gradient boosting fit the training set almost perfectly)' : '') + '.');
+      const yE = evalSet.map(o => o.y), sE = {}, E = {};
+      MODELS.forEach(md => { sE[md.key] = evalSet.map(o => FM[md.key].s(o.x)); E[md.key] = evalAt(sE[md.key], yE, FM[md.key].cutS); });
+      const sOE = O ? evalSet.map(origScore) : null, eO = O ? evalAt(sOE, yE, origCutS) : null;
+      const eL = E.lda, eG = E.logit, selE = pick ? E[pick] : null, selName = pick ? nameOf(pick) : '';
+
+      // ---- SHAP: what drives each model's predictions on the evaluation set ----
+      const Xe = evalSet.map(o => o.x), trMean = D.names.map((_, j) => tr.reduce((s, o) => s + o.x[j], 0) / tr.length);
+      const SH = {
+        lda: Xe.map(x => x.map((xi, j) => L.c[j] * (xi - trMean[j]))),
+        logit: Xe.map(x => x.map((xi, j) => G.b[j + 1] * (xi - trMean[j])))
+      };
+      if (ml) { SH.rf = shapRF(FM.rf.m, Xe).phi; SH.gb = shapGB(FM.gb.m, Xe).phi; }
+      const imp = {}; MODELS.forEach(md => { const mabs = D.names.map((_, j) => SH[md.key].reduce((s, r) => s + Math.abs(r[j]), 0) / Xe.length), tot = mabs.reduce((a, b) => a + b, 0) || 1; imp[md.key] = { mabs, share: mabs.map(x => x / tot) }; });
+      const rankOf = arr => arr.map(x => 1 + arr.filter(y => y > x + 1e-15).length);
 
       // ---- univariate statistics (training set) ----
-      const trY = tr.map(o => o.y);
       const univ = D.names.map((nm, j) => {
         const a = tr.filter(o => o.y === 0).map(o => o.x[j]), b = tr.filter(o => o.y === 1).map(o => o.x[j]);
         const ma = a.reduce((s, x) => s + x, 0) / a.length, mb = b.reduce((s, x) => s + x, 0) / b.length;
@@ -1472,27 +1605,35 @@
       const gRows = [['Intercept', 'Constant']].concat(D.names.map((nm, j) => [nm, D.descs[j]])).map((r, j) => r.concat([G.b[j], G.penalized ? '' : G.se[j], G.penalized ? '' : G.z[j], G.penalized ? '' : pvTxt(G.pz[j]) + ' ' + stars(G.pz[j]), j ? Math.exp(G.b[j]) : '', j ? G.std[j - 1] : '']).concat(O && O.sym === 'O' ? [j ? ow[j - 1] : O.b0] : []));
       const gCols = [{ h: 'Var', num: false }, { h: 'Description', num: false }, { h: 'Coefficient', fmt: x => sigT(x, 4) }, { h: 'Std. error', fmt: x => sigT(x, 4) }, { h: 'z', fmt: x => num(x, 3) }, { h: 'p-value', num: false }, { h: 'Odds ratio', fmt: x => sigT(x, 4) }, { h: 'Standardized', fmt: x => num(x, 3) }].concat(O && O.sym === 'O' ? [{ h: 'Original Ohlson', fmt: x => num(x, 4) }] : []);
       const fmtE = e => [e.acc, e.t1, e.t2, e.auc];
-      const perfRows = [['Discriminant (LDA)', 'Z < ' + num(L.cut, 3)].concat(fmtE(eL)), ['Logit', 'P ≥ ' + pct(G.cut, 1)].concat(fmtE(eG))];
+      const cutTxt = md => md.key === 'lda' ? 'Z < ' + num(L.cut, 3) : 'P ≥ ' + pct(FM[md.key].cutS, 1);
+      const perfRows = MODELS.map(md => [md.name, cutTxt(md)].concat(fmtE(E[md.key])));
       if (O) perfRows.push(['Original ' + O.name, (O.sym === 'O' ? 'P ≥ ' : O.sym + ' < ') + O.cutTxt].concat(fmtE(eO)));
       const pc = x => pct(x, 1);
       const perfCols = [{ h: 'Model', num: false }, { h: 'Cut-off', num: false }, { h: 'Accuracy', fmt: pc }, { h: 'Type I error', fmt: pc }, { h: 'Type II error', fmt: pc }, { h: 'AUC', fmt: x => num(x, 3) }];
-      const conf = [['Actual distressed (' + (eL.tp + eL.fn) + ')', eL.tp, eL.fn, eG.tp, eG.fn].concat(O ? [eO.tp, eO.fn] : []), ['Actual healthy (' + (eL.fp + eL.tn) + ')', eL.fp, eL.tn, eG.fp, eG.tn].concat(O ? [eO.fp, eO.tn] : [])];
-      const confCols = [{ h: '', num: false }, { h: 'LDA: pred. distressed', fmt: x => num(x, 0) }, { h: 'LDA: pred. healthy', fmt: x => num(x, 0) }, { h: 'Logit: pred. distressed', fmt: x => num(x, 0) }, { h: 'Logit: pred. healthy', fmt: x => num(x, 0) }].concat(O ? [{ h: 'Original: pred. distressed', fmt: x => num(x, 0) }, { h: 'Original: pred. healthy', fmt: x => num(x, 0) }] : []);
-      const cvRows = cv.map(c => ['Validation fold ' + c.f, `${c.n} (${c.nD} D)`, c.eL.acc, c.eL.auc, c.eG.acc, c.eG.auc]);
-      if (k) cvRows.push(['<b>CV score (average)</b>', `${tr.length} firms`, cvL.acc, cvL.auc, cvG.acc, cvG.auc]);
-      const cvCols = [{ h: '', num: false }, { h: 'Firms', num: false }, { h: 'LDA accuracy', fmt: pc }, { h: 'LDA AUC', fmt: x => num(x, 3) }, { h: 'Logit accuracy', fmt: pc }, { h: 'Logit AUC', fmt: x => num(x, 3) }];
+      const conf = MODELS.map(md => [md.name, E[md.key].tp, E[md.key].fn, E[md.key].fp, E[md.key].tn]);
+      if (O) conf.push(['Original ' + O.name, eO.tp, eO.fn, eO.fp, eO.tn]);
+      const nDE = eL.tp + eL.fn, nHE = eL.fp + eL.tn, c0 = x => num(x, 0);
+      const confCols = [{ h: 'Model', num: false }, { h: `Distressed caught (of ${nDE})`, fmt: c0 }, { h: 'Distressed missed (Type I)', fmt: c0 }, { h: `Healthy flagged (Type II, of ${nHE})`, fmt: c0 }, { h: 'Healthy correct', fmt: c0 }];
+      const cvRows = MODELS.map(md => [md.name].concat(cv.map(c => c.e[md.key].auc), [cvS[md.key].auc, cvS[md.key].acc]));
+      const cvCols = [{ h: 'Model', num: false }].concat(cv.map(c => ({ h: `Fold ${c.f} AUC`, fmt: x => num(x, 3) })), [{ h: '<b>CV AUC</b>', fmt: x => num(x, 3) }, { h: 'CV accuracy', fmt: pc }]);
       const cls = (pd) => pd ? 'Distressed' : 'Healthy';
       const scored = lab.map(o => ({ o, set: o.set === 'test' ? 'Test' : 'Training', fold: o.set === 'test' ? '' : (o.fold ? String(o.fold) : ''), st: o.y ? '1' : '0' })).concat(D.unl.map(o => ({ o, set: 'Unlabeled', fold: '', st: '' })));
-      const scRows = scored.map(({ o, set, fold, st }) => { const z = L.Z(o.x), pr = G.P(o.x); return [o.firm, o.year, st, set, fold, z, cls(z < L.cut), pr, cls(pr >= G.cut)].concat(O ? [O.sym === 'O' ? origScore(o) : -origScore(o)] : []); });
-      const scCols = [{ h: 'Firm', num: false }, { h: 'Year', num: false }, { h: 'Status', num: false }, { h: 'Set', num: false }, { h: 'Fold', num: false }, { h: 'LDA Z', fmt: x => num(x, 3) }, { h: 'LDA class', num: false }, { h: 'Logit P(distress)', fmt: x => pct(x, 1) }, { h: 'Logit class', num: false }].concat(O ? [{ h: 'Original ' + O.sym, fmt: x => O.sym === 'O' ? pct(x, 1) : num(x, 3) }] : []);
+      const scRows = scored.map(({ o, set, fold, st }) => { const z = L.Z(o.x), pr = G.P(o.x); const row = [o.firm, o.year, st, set, fold, z, cls(z < L.cut), pr, cls(pr >= G.cut)];
+        if (ml) { const pf = FM.rf.s(o.x), pb = FM.gb.s(o.x); row.push(pf, cls(pf >= FM.rf.cutS), pb, cls(pb >= FM.gb.cutS)); }
+        return row.concat(O ? [O.sym === 'O' ? origScore(o) : -origScore(o)] : []); });
+      const scCols = [{ h: 'Firm', num: false }, { h: 'Year', num: false }, { h: 'Status', num: false }, { h: 'Set', num: false }, { h: 'Fold', num: false }, { h: 'LDA Z', fmt: x => num(x, 3) }, { h: 'LDA class', num: false }, { h: 'Logit P(distress)', fmt: x => pct(x, 1) }, { h: 'Logit class', num: false }]
+        .concat(ml ? [{ h: 'RF P(distress)', fmt: x => pct(x, 1) }, { h: 'RF class', num: false }, { h: 'GB P(distress)', fmt: x => pct(x, 1) }, { h: 'GB class', num: false }] : [])
+        .concat(O ? [{ h: 'Original ' + O.sym, fmt: x => O.sym === 'O' ? pct(x, 1) : num(x, 3) }] : []);
       const unlN = D.unl.length;
+      const impRows = D.names.map((nm, j) => [nm, D.descs[j]].concat(...MODELS.map(md => [imp[md.key].share[j], rankOf(imp[md.key].share)[j]])));
+      const impCols = [{ h: 'Var', num: false }, { h: 'Description', num: false }].concat(...MODELS.map(md => [{ h: md.short + ' share', fmt: x => pct(x, 1) }, { h: md.short + ' rank', fmt: x => num(x, 0) }]));
 
       const sumTxt = `${lab.length} firms: ${nD} distressed, ${nH} healthy`;
       const kpis = [
         { k: 'Sample', v: `${lab.length} firms`, s: `${nD} distressed, ${nH} healthy · training ${tr.length}, test ${te.length}${unlN ? ', unlabeled ' + unlN : ''}` },
-        k ? { k: 'CV score (AUC)', v: `${num(cvL.auc, 3)} / ${num(cvG.auc, 3)}`, s: `LDA / logit, average of ${k} validation folds` } : { k: 'Cross-validation', v: 'off', s: 'Set k ≥ 2 to compare the models by CV score' },
-        k ? { k: 'Selected model', v: selName, s: 'Higher CV score (AUC), refitted on the whole training set', cls: 'good' } : null,
-        { k: (te.length ? 'Hold-out test' : 'In-sample') + (selE ? ': ' + (pick === 'logit' ? 'logit' : 'LDA') : ': LDA / logit'), v: selE ? `${pct(selE.acc, 1)} accuracy` : `${pct(eL.acc, 1)} / ${pct(eG.acc, 1)}`, s: selE ? `AUC ${num(selE.auc, 3)} · Type I ${pct(selE.t1, 1)} · Type II ${pct(selE.t2, 1)}` : 'accuracy' },
+        k ? { k: 'CV score (AUC)', v: MODELS.map(md => num(cvS[md.key].auc, 3)).join(' / '), s: MODELS.map(md => md.short).join(' / ') + `, average of ${k} validation folds` } : { k: 'Cross-validation', v: 'off', s: 'Set k ≥ 2 to compare the models by CV score' },
+        k ? { k: 'Selected model', v: selName, s: 'Highest CV score (AUC), refitted on the whole training set', cls: 'good' } : null,
+        { k: (te.length ? 'Hold-out test' : 'In-sample') + (selE ? ': ' + MODELS.find(md => md.key === pick).short : ''), v: selE ? `${pct(selE.acc, 1)} accuracy` : MODELS.map(md => pct(E[md.key].acc, 0)).join(' / '), s: selE ? `AUC ${num(selE.auc, 3)} · Type I ${pct(selE.t1, 1)} · Type II ${pct(selE.t2, 1)}` : 'accuracy, ' + MODELS.map(md => md.short).join(' / ') },
         O ? { k: 'Original ' + O.sym + ' on the same firms', v: `${pct(eO.acc, 1)} accuracy`, s: `AUC ${num(eO.auc, 3)} · Type I ${pct(eO.t1, 1)} · cut-off ${O.cutTxt}`, cls: selE ? (eO.acc + 1e-9 < selE.acc ? 'warn' : 'good') : '' } : null
       ].filter(Boolean);
 
@@ -1501,24 +1642,30 @@
       const html = `<div class="panel"><div class="panel-h"><h3>Estimated models (training set, ${tr.length} firms)</h3></div><div class="panel-b">
         <div class="formula">${eqTxt} &nbsp;&nbsp;→ distressed if Z &lt; ${num(L.cut, 3)}</div>
         <div class="formula" style="margin-top:8px">${pTxt} &nbsp;&nbsp;→ distressed if P ≥ ${pct(G.cut, 1)}</div>
-        <div class="note" style="margin-top:8px">Like Altman's Z, a higher LDA score means a healthier firm. The logit gives the probability of distress, like Ohlson's O-score. Variables are as defined in your sample (${p} variables).</div></div></div>`;
+        <div class="note" style="margin-top:8px">Like Altman's Z, a higher LDA score means a healthier firm. The logit gives the probability of distress, like Ohlson's O-score.${ml ? ` Random forest (${FM.rf.m.T} trees) and gradient boosting (${FM.gb.m.R} trees) have no equation: they give a probability of distress (cut-offs ${pct(FM.rf.cutS, 1)} and ${pct(FM.gb.cutS, 1)}), and the SHAP chart below shows which ratios drive them.` : ''}</div></div></div>`;
 
       // ---- charts ----
-      const rocL = roc(sLE, yE), rocG = roc(sGE, yE), rocO = O ? roc(sOE, yE) : null;
       const charts = [{
-        id: 'roc', title: 'ROC curves on the ' + evalName, tall: false,
+        id: 'roc', title: 'ROC curves on the ' + evalName,
         note: 'Each curve shows the share of distressed firms caught (true positive rate) against the share of healthy firms flagged (false positive rate) over all cut-offs. AUC = area under the curve (0.5 = coin flip, 1 = perfect).',
-        build: T => ({ type: 'line', data: { datasets: [ds('LDA (AUC ' + num(eL.auc, 3) + ')', rocL, T.c[0], { borderWidth: 2.5, stepped: false }), ds('Logit (AUC ' + num(eG.auc, 3) + ')', rocG, T.c[1], { borderWidth: 2.5 })].concat(O ? [ds('Original ' + O.sym + ' (AUC ' + num(eO.auc, 3) + ')', rocO, T.c[4], { borderWidth: 2, borderDash: [5, 4] })] : []).concat([ds('Random (0.5)', [{ x: 0, y: 0 }, { x: 1, y: 1 }], T.muted, { borderWidth: 1, borderDash: [3, 3] })]) },
+        build: T => ({ type: 'line', data: { datasets: MODELS.map(md => ds(md.short + ' (AUC ' + num(E[md.key].auc, 3) + ')', roc(sE[md.key], yE), T.c[md.col], { borderWidth: 2.5 }))
+          .concat(O ? [ds('Original ' + O.sym + ' (AUC ' + num(eO.auc, 3) + ')', roc(sOE, yE), T.c[4], { borderWidth: 2, borderDash: [5, 4] })] : []).concat([ds('Random (0.5)', [{ x: 0, y: 0 }, { x: 1, y: 1 }], T.muted, { borderWidth: 1, borderDash: [3, 3] })]) },
           options: lineOpts(T, { xTitle: 'False positive rate (1 − specificity)', yTitle: 'True positive rate (sensitivity)', xMin: 0, xMax: 1, yMin: 0, yMax: 1, xFmt: x => num(x, 2), yFmt: x => num(x, 2) }) })
       }];
       if (k) charts.push({
         id: 'cvfolds', title: 'Cross-validation: AUC on each validation fold',
-        note: 'Each model is fitted on k − 1 folds of the training set and scored on the held-out validation fold. The CV score is the average over the validation folds: LDA ' + num(cvL.auc, 3) + ', logit ' + num(cvG.auc, 3) + '.',
-        exportData: () => ({ columns: ['Validation fold', 'Firms', 'LDA accuracy', 'LDA AUC', 'Logit accuracy', 'Logit AUC'], rows: cv.map(c => [c.f, c.n, c.eL.acc, c.eL.auc, c.eG.acc, c.eG.auc]) }),
-        build: T => ({ type: 'bar', data: { labels: cv.map(c => 'Fold ' + c.f), datasets: [{ label: 'LDA', data: cv.map(c => c.eL.auc), backgroundColor: T.alpha(T.c[0], .85), borderRadius: 5 }, { label: 'Logit', data: cv.map(c => c.eG.auc), backgroundColor: T.alpha(T.c[1], .85), borderRadius: 5 }] },
-          options: { plugins: { legend: { position: 'bottom' }, tooltip: { callbacks: { label: c => ' ' + c.dataset.label + ': AUC ' + num(c.parsed.y, 3) } } }, scales: { x: { grid: { display: false } }, y: { min: Math.max(0, Math.floor(Math.min(...cv.flatMap(c => [c.eL.auc, c.eG.auc]).filter(isFinite)) * 10 - 1) / 10), max: 1, grid: { color: T.grid } } } } })
+        note: 'Each model is fitted on k − 1 folds of the training set and scored on the held-out validation fold. CV score (average): ' + MODELS.map(md => md.short + ' ' + num(cvS[md.key].auc, 3)).join(', ') + '.',
+        exportData: () => ({ columns: ['Validation fold', 'Firms'].concat(MODELS.map(md => md.short + ' AUC')), rows: cv.map(c => [c.f, c.n].concat(MODELS.map(md => c.e[md.key].auc))) }),
+        build: T => ({ type: 'bar', data: { labels: cv.map(c => 'Fold ' + c.f), datasets: MODELS.map(md => ({ label: md.short, data: cv.map(c => c.e[md.key].auc), backgroundColor: T.alpha(T.c[md.col], .85), borderRadius: 5 })) },
+          options: { plugins: { legend: { position: 'bottom' }, tooltip: { callbacks: { label: c => ' ' + c.dataset.label + ': AUC ' + num(c.parsed.y, 3) } } }, scales: { x: { grid: { display: false } }, y: { min: Math.max(0, Math.floor(Math.min(...cv.flatMap(c => MODELS.map(md => c.e[md.key].auc)).filter(isFinite)) * 10 - 1) / 10), max: 1, grid: { color: T.grid } } } } })
       });
-      // histogram of LDA scores on the training set
+      charts.push({
+        id: 'shap', title: 'What drives the predictions: share of mean |SHAP| by variable (' + evalName + ')',
+        note: 'SHAP splits each firm\'s prediction into the contribution of every ratio. Bars = each variable\'s share of the average absolute contribution, so the models are comparable even though their scores are on different scales. ' + (ml ? 'Random forest and gradient boosting use exact TreeSHAP; ' : '') + 'LDA and logit use the linear SHAP value coefficient × (value − training mean).',
+        exportData: () => ({ columns: ['Variable'].concat(MODELS.map(md => md.short + ' share of mean |SHAP|')), rows: D.names.map((nm, j) => [nm].concat(MODELS.map(md => imp[md.key].share[j]))) }),
+        build: T => ({ type: 'bar', data: { labels: D.names, datasets: MODELS.map(md => ({ label: md.short, data: imp[md.key].share, backgroundColor: T.alpha(T.c[md.col], .85), borderRadius: 4 })) },
+          options: { indexAxis: 'y', plugins: { legend: { position: 'bottom' }, tooltip: { callbacks: { label: c => ' ' + c.dataset.label + ': ' + pct(c.parsed.x, 1) } } }, scales: { x: { grid: { color: T.grid }, ticks: { callback: x => pct(x, 0) } }, y: { grid: { display: false } } } } })
+      });
       const zTr = tr.map(o => L.Z(o.x)); const zSorted = zTr.slice().sort((a, b) => a - b);
       const lo = F.quantileSorted(zSorted, 0.01), hi = F.quantileSorted(zSorted, 0.99), nb = 24, bw = (hi - lo) / nb || 1;
       const bins = Array.from({ length: nb }, (_, i) => lo + (i + 0.5) * bw);
@@ -1532,7 +1679,7 @@
           options: { parsing: true, scales: { x: { type: 'linear', offset: false, min: lo, max: hi, title: { display: true, text: 'LDA score Z' }, grid: { color: T.grid }, ticks: { callback: x => num(x, 1) } }, y: { beginAtZero: true, title: { display: true, text: 'Firms' }, grid: { color: T.grid }, ticks: { precision: 0 } } }, plugins: { legend: { position: 'bottom' }, tooltip: { callbacks: { title: it => 'Z ≈ ' + num(it[0].parsed.x, 2), label: c => ' ' + c.dataset.label + ': ' + c.parsed.y } }, vlines: { lines: [{ x: L.cut, color: T.text, label: 'cut-off ' + num(L.cut, 2) }] } } } })
       });
       charts.push({
-        id: 'stdcoef', title: 'Relative importance: standardized coefficients',
+        id: 'stdcoef', title: 'LDA and logit: standardized coefficients',
         note: 'Coefficients per one standard deviation of each variable, so they are comparable across variables. LDA: positive = healthier. Logit: positive = more likely distressed (opposite sign convention).',
         exportData: () => ({ columns: ['Variable', 'LDA standardized', 'Logit standardized'], rows: D.names.map((nm, j) => [nm, L.std[j], G.std[j]]) }),
         build: T => ({ type: 'bar', data: { labels: D.names, datasets: [{ label: 'LDA (+ = healthier)', data: L.std, backgroundColor: T.alpha(T.c[0], .85), borderRadius: 5 }, { label: 'Logit (+ = more distress)', data: G.std, backgroundColor: T.alpha(T.c[1], .85), borderRadius: 5 }] },
@@ -1540,9 +1687,10 @@
       });
 
       const tables = [
-        { id: 'perf', title: 'Classification results on the ' + evalName + ` (${evalSet.length} firms)`, columns: perfCols, rows: perfRows, hl: pick ? [pick === 'logit' ? 1 : 0] : [],
+        { id: 'perf', title: 'Classification results on the ' + evalName + ` (${evalSet.length} firms)`, columns: perfCols, rows: perfRows, hl: pick ? [MODELS.findIndex(md => md.key === pick)] : [],
           note: 'Type I error: a distressed firm classified as healthy (the costly mistake for a lender). Type II error: a healthy firm classified as distressed. ' + (te.length ? 'The test set was not used for estimation, cut-offs or model selection.' : '') + (O ? ' The original model uses its published weights and cut-off, with no re-estimation.' : '') },
         { id: 'confusion', title: 'Confusion matrices (' + evalName + ')', columns: confCols, rows: conf },
+        { id: 'shapimp', title: 'Variable importance: share of mean |SHAP| and rank', columns: impCols, rows: impRows, note: 'Rank 1 = the variable that moves that model\'s predictions most. If the rankings agree across models, the evidence on which ratios matter is robust; if the trees rank a variable much higher than LDA or logit, its effect is probably non-linear or works through interactions.' },
         { id: 'lda', title: 'Discriminant function (LDA), estimated on the training set', columns: ldaCols, rows: ldaRows, hl: [p],
           note: `Wilks' Λ = ${num(L.wilks, 4)}, F(${L.df1}, ${L.df2}) = ${num(L.F, 3)}, p ${L.pF < 0.0001 ? '< 0.0001' : '= ' + num(L.pF, 4)}; canonical correlation ${num(L.canon, 3)}; Mahalanobis D² = ${num(L.D2, 3)}. Coefficients are scaled so that the within-group standard deviation of Z is 1 (no constant, as in Altman's Z).` },
         { id: 'logit', title: 'Logit model, estimated on the training set', columns: gCols, rows: gRows,
@@ -1550,20 +1698,23 @@
         { id: 'univ', title: 'Variable means by group and univariate F-tests (training set)', columns: [{ h: 'Var', num: false }, { h: 'Description', num: false }, { h: 'Mean healthy', fmt: x => num(x, 4) }, { h: 'Mean distressed', fmt: x => num(x, 4) }, { h: 'F(1, n−2)', fmt: x => num(x, 2) }, { h: 'p-value', fmt: pvTxt }], rows: univ,
           note: 'As in Altman (1968, Table 1): a large F means the variable separates the two groups well on its own.' }
       ];
-      if (k) tables.splice(2, 0, { id: 'cv', title: `${k}-fold cross-validation on the training set`, columns: cvCols, rows: cvRows, hl: [cvRows.length - 1], note: 'Each validation fold is scored by models fitted on the other ' + (k - 1) + ' folds (cut-offs chosen on those folds). The model with the higher CV score (AUC) is selected and then refitted on the whole training set.' });
+      if (k) tables.splice(2, 0, { id: 'cv', title: `${k}-fold cross-validation on the training set`, columns: cvCols, rows: cvRows, hl: pick ? [MODELS.findIndex(md => md.key === pick)] : [], note: 'Each validation fold is scored by models fitted on the other ' + (k - 1) + ' folds (cut-offs chosen on those folds). CV score = the average over the validation folds; the model with the highest CV AUC (highlighted) is selected and then refitted on the whole training set.' });
       tables.push({ id: 'scored', title: `Scored firms (${scRows.length}${unlN ? ', including ' + unlN + ' unlabeled' : ''})`, columns: scCols, rows: scRows,
         note: 'Scores from the final models fitted on the training set. Fold = the validation fold the firm belonged to in cross-validation. Unlabeled firms (empty Status) are classified with the estimated cut-offs.' });
 
+      let sn = 0; const S = () => ++sn + '. ';
       const steps = [
-        { h: '1. Sample and split', f: [`Hold-out test set: ${pct(frac, 0)} of the firms, drawn at random within each group (stratified), seed ${Math.round(v.seed) || 1}. It is used once, at the end.`, `Training set: the remaining ${tr.length} firms` + (k ? `, split into ${k} folds (stratified).` : '.')], calc: `${sumTxt}\nTraining: ${tr.length} (${trD} distressed) · Test: ${te.length} (${te.filter(o => o.y === 1).length} distressed)${unlN ? ' · Unlabeled: ' + unlN : ''}` },
-        { h: '2. Discriminant analysis (Fisher LDA, Altman style)', f: ['c = S<sub>W</sub><sup>−1</sup> (x̄<sub>healthy</sub> − x̄<sub>distressed</sub>), scaled so that the within-group SD of Z is 1', 'Z = c<sub>1</sub>X<sub>1</sub> + … + c<sub>p</sub>X<sub>p</sub>; conventional cut-off = midpoint of the two group centroids'], calc: eqTxt.replace(/<sup>(.*?)<\/sup>/g, '^$1') + `\nCentroids: healthy ${num(L.cH, 3)}, distressed ${num(L.cD, 3)} → midpoint ${num(L.mid, 3)}; cut-off used ${num(L.cut, 3)}`, note: 'S<sub>W</sub> is the pooled within-group covariance matrix of the variables.' },
-        { h: '3. Logit (maximum likelihood, Ohlson style)', f: ['P(distress) = 1 / (1 + e<sup>−(b<sub>0</sub> + b<sub>1</sub>X<sub>1</sub> + … + b<sub>p</sub>X<sub>p</sub>)</sup>)', 'b maximizes ln L = Σ [y<sub>i</sub> ln P<sub>i</sub> + (1 − y<sub>i</sub>) ln(1 − P<sub>i</sub>)] (Newton-Raphson)'], calc: pTxt.replace(/&nbsp;/g, ' ').replace(/<sup>(.*?)<\/sup>/g, '^($1)').replace(/<[^>]+>/g, '') + `\nCut-off used ${pct(G.cut, 2)}` },
-        { h: '4. Cut-off rule', f: [rule === 'youden' ? 'Choose the cut-off that maximizes sensitivity + specificity − 1 (Youden J), on the data the model was fitted on' : rule === 'accuracy' ? 'Choose the cut-off that maximizes overall accuracy on the data the model was fitted on' : 'LDA: midpoint of the group centroids (equal priors and costs). Logit: P = 50%.'], note: 'With unequal group sizes the balanced (Youden) rule avoids a cut-off that simply labels every firm healthy.' },
-        k ? { h: '5. k-fold cross-validation (training set only)', f: ['For each fold j = 1…k: fit on the other k − 1 folds, score validation fold j', 'CV score = average of the k validation-fold scores; select the model with the higher CV AUC; refit it on the whole training set'], calc: `LDA: CV AUC ${num(cvL.auc, 4)}, CV accuracy ${pct(cvL.acc, 2)}\nLogit: CV AUC ${num(cvG.auc, 4)}, CV accuracy ${pct(cvG.acc, 2)}\nSelected: ${selName}` } : null,
-        { h: (k ? '6' : '5') + '. Final evaluation on the ' + evalName, f: ['Accuracy = (TP + TN) / n; Type I error = FN / distressed; Type II error = FP / healthy', 'AUC = P(score of a random distressed firm > score of a random healthy firm)'], calc: `LDA: accuracy ${pct(eL.acc, 2)}, Type I ${pct(eL.t1, 2)}, Type II ${pct(eL.t2, 2)}, AUC ${num(eL.auc, 4)}\nLogit: accuracy ${pct(eG.acc, 2)}, Type I ${pct(eG.t1, 2)}, Type II ${pct(eG.t2, 2)}, AUC ${num(eG.auc, 4)}` + (O ? `\nOriginal ${O.sym}: accuracy ${pct(eO.acc, 2)}, Type I ${pct(eO.t1, 2)}, Type II ${pct(eO.t2, 2)}, AUC ${num(eO.auc, 4)}` : '') }
+        { h: S() + 'Sample and split', f: [`Hold-out test set: ${pct(frac, 0)} of the firms, drawn at random within each group (stratified), seed ${seed}. It is used once, at the end.`, `Training set: the remaining ${tr.length} firms` + (k ? `, split into ${k} folds (stratified).` : '.')], calc: `${sumTxt}\nTraining: ${tr.length} (${trD} distressed) · Test: ${te.length} (${te.filter(o => o.y === 1).length} distressed)${unlN ? ' · Unlabeled: ' + unlN : ''}` },
+        { h: S() + 'Discriminant analysis (Fisher LDA, Altman style)', f: ['c = S<sub>W</sub><sup>−1</sup> (x̄<sub>healthy</sub> − x̄<sub>distressed</sub>), scaled so that the within-group SD of Z is 1', 'Z = c<sub>1</sub>X<sub>1</sub> + … + c<sub>p</sub>X<sub>p</sub>; conventional cut-off = midpoint of the two group centroids'], calc: eqTxt.replace(/<sup>(.*?)<\/sup>/g, '^$1') + `\nCentroids: healthy ${num(L.cH, 3)}, distressed ${num(L.cD, 3)} → midpoint ${num(L.mid, 3)}; cut-off used ${num(L.cut, 3)}`, note: 'S<sub>W</sub> is the pooled within-group covariance matrix of the variables.' },
+        { h: S() + 'Logit (maximum likelihood, Ohlson style)', f: ['P(distress) = 1 / (1 + e<sup>−(b<sub>0</sub> + b<sub>1</sub>X<sub>1</sub> + … + b<sub>p</sub>X<sub>p</sub>)</sup>)', 'b maximizes ln L = Σ [y<sub>i</sub> ln P<sub>i</sub> + (1 − y<sub>i</sub>) ln(1 − P<sub>i</sub>)] (Newton-Raphson)'], calc: pTxt.replace(/&nbsp;/g, ' ').replace(/<sup>(.*?)<\/sup>/g, '^($1)').replace(/<[^>]+>/g, '') + `\nCut-off used ${pct(G.cut, 2)}` },
+        ml ? { h: S() + 'Machine learning: random forest and gradient boosting', f: [`Random forest: ${FM.rf.m.T} classification trees, each grown on a bootstrap sample with ${FM.rf.m.opt.mtry} randomly chosen variables tried at each split (Gini), at most ${FM.rf.m.opt.maxDepth} levels, at least ${FM.rf.m.opt.minLeaf} firms per leaf; P(distress) = average of the trees`, `Gradient boosting (XGBoost-style): ${FM.gb.m.R} trees of depth ${FM.gb.m.opt.maxDepth} added one at a time, each fitted to the gradient and Hessian of the log-loss, learning rate ${FM.gb.m.lr}, L2 leaf penalty λ = ${FM.gb.m.lambda}, 80% row subsampling; P(distress) = 1 / (1 + e<sup>−(sum of trees)</sup>)`], calc: `Cut-offs: RF ${pct(FM.rf.cutS, 2)} (chosen on out-of-bag probabilities), GB ${pct(FM.gb.cutS, 2)} (chosen on inner 3-fold out-of-fold probabilities)`, note: 'Trees use the ratios as they are (no scaling) and can capture thresholds and interactions that a linear score cannot. They have no coefficients; SHAP values explain them. Gradient boosting here follows the XGBoost algorithm but is implemented in the browser, so results are close to, not identical with, the xgboost library.' } : null,
+        { h: S() + 'Cut-off rule', f: [rule === 'youden' ? 'Choose the cut-off that maximizes sensitivity + specificity − 1 (Youden J), on the data the model was fitted on' : rule === 'accuracy' ? 'Choose the cut-off that maximizes overall accuracy on the data the model was fitted on' : 'LDA: midpoint of the group centroids (equal priors and costs). Logit' + (ml ? ', RF and GB' : '') + ': P = 50%.'], note: 'With unequal group sizes the balanced (Youden) rule avoids a cut-off that simply labels every firm healthy.' },
+        k ? { h: S() + 'k-fold cross-validation (training set only)', f: ['For each fold j = 1…k: fit on the other k − 1 folds, score validation fold j', 'CV score = average of the k validation-fold scores; select the model with the highest CV AUC; refit it on the whole training set'], calc: MODELS.map(md => `${md.name}: CV AUC ${num(cvS[md.key].auc, 4)}, CV accuracy ${pct(cvS[md.key].acc, 2)}`).join('\n') + `\nSelected: ${selName}` } : null,
+        { h: S() + 'Final evaluation on the ' + evalName, f: ['Accuracy = (TP + TN) / n; Type I error = FN / distressed; Type II error = FP / healthy', 'AUC = P(score of a random distressed firm > score of a random healthy firm)'], calc: MODELS.map(md => `${md.name}: accuracy ${pct(E[md.key].acc, 2)}, Type I ${pct(E[md.key].t1, 2)}, Type II ${pct(E[md.key].t2, 2)}, AUC ${num(E[md.key].auc, 4)}`).join('\n') + (O ? `\nOriginal ${O.sym}: accuracy ${pct(eO.acc, 2)}, Type I ${pct(eO.t1, 2)}, Type II ${pct(eO.t2, 2)}, AUC ${num(eO.auc, 4)}` : '') },
+        { h: S() + 'Explaining the models with SHAP', f: ['f(x) = base value + φ<sub>1</sub> + … + φ<sub>p</sub>: each φ<sub>j</sub> is the Shapley value of variable j, its fair share of the gap between this firm\'s prediction and the average', 'Importance of variable j = average |φ<sub>j</sub>| over the ' + evalName + ', shown as a share of the total'], note: 'Trees: exact TreeSHAP (Lundberg et al.). LDA and logit: φ<sub>j</sub> = coefficient × (x<sub>j</sub> − training mean). SHAP shows what the model relies on, not what causes distress.' }
       ].filter(Boolean);
       return { warnings, kpis, html, charts, tables, steps,
-        refs: 'Fisher, R. A. (1936). The use of multiple measurements in taxonomic problems. <i>Annals of Eugenics</i>, 7(2). Altman, E. I. (1968). Financial ratios, discriminant analysis and the prediction of corporate bankruptcy. <i>Journal of Finance</i>, 23(4). Ohlson, J. A. (1980). Financial ratios and the probabilistic prediction of bankruptcy. <i>Journal of Accounting Research</i>, 18(1). Altman, E. I., Iwanicz-Drozdowska, M., Laitinen, E. K. and Suvas, A. (2017). Financial distress prediction in an international context: a review and empirical analysis of Altman\'s Z-score model. <i>Journal of International Financial Management &amp; Accounting</i>, 28(2). Hanley, J. A. and McNeil, B. J. (1982). The meaning and use of the area under a ROC curve. <i>Radiology</i>, 143(1).' };
+        refs: 'Fisher, R. A. (1936). The use of multiple measurements in taxonomic problems. <i>Annals of Eugenics</i>, 7(2). Altman, E. I. (1968). Financial ratios, discriminant analysis and the prediction of corporate bankruptcy. <i>Journal of Finance</i>, 23(4). Ohlson, J. A. (1980). Financial ratios and the probabilistic prediction of bankruptcy. <i>Journal of Accounting Research</i>, 18(1). Altman, E. I., Iwanicz-Drozdowska, M., Laitinen, E. K. and Suvas, A. (2017). Financial distress prediction in an international context: a review and empirical analysis of Altman\'s Z-score model. <i>Journal of International Financial Management &amp; Accounting</i>, 28(2). Breiman, L. (2001). Random forests. <i>Machine Learning</i>, 45(1). Chen, T. and Guestrin, C. (2016). XGBoost: a scalable tree boosting system. <i>Proceedings of KDD 2016</i>. Lundberg, S. M., Erion, G. G. and Lee, S.-I. (2018). Consistent individualized feature attribution for tree ensembles. arXiv:1802.03888. Hanley, J. A. and McNeil, B. J. (1982). The meaning and use of the area under a ROC curve. <i>Radiology</i>, 143(1).' };
     }
   });
 
