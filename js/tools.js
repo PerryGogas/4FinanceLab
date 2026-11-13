@@ -25,10 +25,13 @@
     loan: '<path d="M3 10l9-6 9 6"/><path d="M5 10v9M19 10v9M9 10v9M15 10v9M3 21h18"/>',
     pie: '<path d="M12 3v9h9"/><path d="M20.5 15.5A9 9 0 1 1 8.5 3.7"/>',
     sml: '<path d="M3 21V3M3 21h18"/><path d="M5 17l14-10"/><circle cx="13" cy="10" r="1.6"/>',
+    tvm: '<circle cx="8" cy="16" r="5"/><path d="M8 13.5v5M6.5 14.5h2.2a1 1 0 0 1 0 2H7.3a1 1 0 0 0 0 2h2.2"/><path d="M13 11l7-7M15 4h5v5"/>',
+    annuity: '<ellipse cx="12" cy="5.5" rx="7" ry="2.5"/><path d="M5 5.5v4c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5v-4"/><path d="M5 9.5v4c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5v-4"/><path d="M5 13.5v4c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5v-4"/>',
     lab: '<path d="M9 3h6M10 3v6L4.5 19a1.5 1.5 0 0 0 1.3 2h12.4a1.5 1.5 0 0 0 1.3-2L14 9V3"/><path d="M7 15h10"/>'
   };
 
   window.FL_CATS = [
+    { id: 'tvm', name: 'Time Value of Money' },
     { id: 'distress', name: 'Credit & Distress' },
     { id: 'fixed', name: 'Fixed Income' },
     { id: 'deriv', name: 'Derivatives' },
@@ -1715,6 +1718,298 @@
       ].filter(Boolean);
       return { warnings, kpis, html, charts, tables, steps,
         refs: 'Fisher, R. A. (1936). The use of multiple measurements in taxonomic problems. <i>Annals of Eugenics</i>, 7(2). Altman, E. I. (1968). Financial ratios, discriminant analysis and the prediction of corporate bankruptcy. <i>Journal of Finance</i>, 23(4). Ohlson, J. A. (1980). Financial ratios and the probabilistic prediction of bankruptcy. <i>Journal of Accounting Research</i>, 18(1). Altman, E. I., Iwanicz-Drozdowska, M., Laitinen, E. K. and Suvas, A. (2017). Financial distress prediction in an international context: a review and empirical analysis of Altman\'s Z-score model. <i>Journal of International Financial Management &amp; Accounting</i>, 28(2). Breiman, L. (2001). Random forests. <i>Machine Learning</i>, 45(1). Chen, T. and Guestrin, C. (2016). XGBoost: a scalable tree boosting system. <i>Proceedings of KDD 2016</i>. Lundberg, S. M., Erion, G. G. and Lee, S.-I. (2018). Consistent individualized feature attribution for tree ensembles. arXiv:1802.03888. Hanley, J. A. and McNeil, B. J. (1982). The meaning and use of the area under a ROC curve. <i>Radiology</i>, 143(1).' };
+    }
+  });
+
+  /* =====================================================================
+     TIME VALUE OF MONEY 1. PRESENT & FUTURE VALUE OF A SINGLE AMOUNT (v2.6)
+     ===================================================================== */
+  const FREQS = [['1', 'Annual (1)'], ['2', 'Semi-annual (2)'], ['4', 'Quarterly (4)'], ['12', 'Monthly (12)'], ['52', 'Weekly (52)'], ['365', 'Daily (365)'], ['c', 'Continuous']];
+  const freqName = m => (FREQS.find(f => f[0] === String(m)) || [0, String(m)])[1];
+  // growth factor of $1 over t years at nominal annual rate r compounded m times a year (m = 'c': continuous)
+  const growthF = (r, t, m) => m === 'c' ? Math.exp(r * t) : Math.pow(1 + r / m, m * t);
+  const lnGrowth = (r, m) => m === 'c' ? r : m * Math.log1p(r / m); // continuously compounded equivalent rate
+  const earOf = (r, m) => Math.expm1(lnGrowth(r, m));
+
+  TOOLS.push({
+    id: 'tvm', cat: 'tvm', icon: 'tvm', title: 'Present & Future Value', short: 'PV & FV', isNew: true,
+    desc: 'Compound a single amount forward or discount it back. Solve for PV, FV, the interest rate or the time needed, with any compounding frequency.',
+    long: 'Enter three of the four values and choose what to solve for. The rate is a nominal annual rate (APR) compounded m times a year; the effective annual rate (EAR) is shown alongside.',
+    inputs: [
+      { id: 'solve', label: 'Solve for', type: 'select', value: 'fv', options: [['fv', 'Future value (FV)'], ['pv', 'Present value (PV)'], ['r', 'Interest rate (r)'], ['n', 'Number of years (n)']] },
+      { id: 'pv', label: 'Present value PV', unit: '$', value: 1000, disabledIf: v => v.solve === 'pv' },
+      { id: 'fv', label: 'Future value FV', unit: '$', value: 2000, disabledIf: v => v.solve === 'fv' },
+      { id: 'r', label: 'Annual interest rate r (nominal, APR)', unit: '%', value: 6, step: 0.05, disabledIf: v => v.solve === 'r' },
+      { id: 'n', label: 'Number of years n', unit: 'years', value: 10, step: 0.5, disabledIf: v => v.solve === 'n' },
+      { id: 'm', label: 'Compounding frequency m', type: 'select', value: '1', options: FREQS, hint: 'Times per year that interest is added to the balance.' }
+    ],
+    compute(v) {
+      const m = v.m === 'c' ? 'c' : parseInt(v.m), cont = m === 'c', s = v.solve;
+      let pv = v.pv, fv = v.fv, n = v.n, r = v.r / 100;
+      if (s !== 'pv' && !(pv > 0)) return { error: 'The present value must be positive.' };
+      if (s !== 'fv' && !(fv > 0)) return { error: 'The future value must be positive.' };
+      if (s !== 'n' && !(n >= 0)) return { error: 'The number of years cannot be negative.' };
+      if (s !== 'n' && n > 1000) return { error: 'Please use at most 1,000 years.' };
+      if (s !== 'r' && !cont && !(r > -m)) return { error: `The rate must be above −${num(100 * m, 0)}% for this compounding frequency.` };
+      const iTxt = cont ? '' : `i = r / m = ${num(v.r, 4)}% / ${m} = ${num(r / m * 100, 6)}%`;
+      let solveStep;
+      if (s === 'fv') {
+        fv = pv * growthF(r, n, m);
+        solveStep = { h: '2. Future value', f: [cont ? 'FV = PV · e<sup>r·n</sup>' : 'FV = PV · (1 + r/m)<sup>m·n</sup>'], calc: cont ? `FV = ${num(pv, 2)} × e^(${num(r, 6)} × ${num(n, 4)}) = ${num(fv, 4)}` : `FV = ${num(pv, 2)} × (1 + ${num(r / m, 8)})^${num(m * n, 4)} = ${num(pv, 2)} × ${num(fv / pv, 8)} = ${num(fv, 4)}` };
+      } else if (s === 'pv') {
+        pv = fv / growthF(r, n, m);
+        solveStep = { h: '2. Present value (discounting)', f: [cont ? 'PV = FV · e<sup>−r·n</sup>' : 'PV = FV / (1 + r/m)<sup>m·n</sup>'], calc: cont ? `PV = ${num(fv, 2)} × e^(−${num(r, 6)} × ${num(n, 4)}) = ${num(pv, 4)}` : `PV = ${num(fv, 2)} / (1 + ${num(r / m, 8)})^${num(m * n, 4)} = ${num(fv, 2)} × ${num(pv / fv, 8)} = ${num(pv, 4)}` };
+      } else if (s === 'r') {
+        if (!(n > 0)) return { error: 'The number of years must be positive to solve for the rate.' };
+        r = cont ? Math.log(fv / pv) / n : m * (Math.pow(fv / pv, 1 / (m * n)) - 1);
+        solveStep = { h: '2. Interest rate', f: [cont ? 'r = ln(FV / PV) / n' : 'r = m · [(FV / PV)<sup>1/(m·n)</sup> − 1]'], calc: cont ? `r = ln(${num(fv, 2)} / ${num(pv, 2)}) / ${num(n, 4)} = ${pct(r, 6)}` : `r = ${m} × [(${num(fv, 2)} / ${num(pv, 2)})^(1/${num(m * n, 4)}) − 1] = ${pct(r, 6)}` };
+      } else {
+        const gl = lnGrowth(r, m), ratio = fv / pv;
+        if (ratio !== 1 && (gl === 0 || (ratio > 1) !== (gl > 0))) return { error: `At ${num(v.r, 2)}% a present value of ${money(pv, 2)} can never ${ratio > 1 ? 'grow' : 'shrink'} to ${money(fv, 2)}.` };
+        n = ratio === 1 ? 0 : Math.log(ratio) / gl;
+        if (n > 1000) return { error: `This takes ${num(n, 0)} years; please use inputs that need at most 1,000 years.` };
+        solveStep = { h: '2. Number of years', f: [cont ? 'n = ln(FV / PV) / r' : 'n = ln(FV / PV) / [m · ln(1 + r/m)]'], calc: cont ? `n = ln(${num(ratio, 6)}) / ${num(r, 6)} = ${num(n, 4)} years` : `n = ln(${num(ratio, 6)}) / [${m} × ln(1 + ${num(r / m, 8)})] = ${num(n, 4)} years (${num(m * n, 4)} periods)` };
+      }
+      const G = growthF(r, n, m), ear = earOf(r, m), gl = lnGrowth(r, m), dbl = gl > 0 ? Math.LN2 / gl : NaN;
+      const solvedName = { fv: 'Future value', pv: 'Present value', r: 'Interest rate (APR)', n: 'Years needed' }[s];
+      const bigM = x => money(x, Math.abs(x) >= 1e5 ? 0 : 2);
+      const solvedVal = { fv: bigM(fv), pv: bigM(pv), r: pct(r, 4), n: num(n, 4) + ' yrs' }[s];
+      const solvedSub = { fv: `${money(pv, 2)} after ${num(n, 2)} years`, pv: `of ${money(fv, 2)} due in ${num(n, 2)} years`, r: `compounded ${cont ? 'continuously' : freqName(m).toLowerCase()}`, n: cont ? 'continuous compounding' : `${num(m * n, 2)} compounding periods` }[s];
+
+      // chart data
+      const tMax = n > 0 ? n : 1, xs = F.linspace(0, tMax, 121);
+      const steps = !cont && m * tMax <= 120 ? Array.from({ length: Math.floor(m * tMax + 1e-9) + 1 }, (_, k) => k / m) : [];
+      const fq = FREQS.map(f => f[0] === 'c' ? 'c' : parseInt(f[0]));
+      const fqOk = fq.map(q => q === 'c' || r > -q);
+      const fqFV = fq.map((q, k) => fqOk[k] ? pv * growthF(r, n, q) : NaN), fqPV = fq.map((q, k) => fqOk[k] ? fv / growthF(r, n, q) : NaN);
+      const cur = FREQS.findIndex(f => f[0] === String(v.m));
+      const byPV = s === 'pv';
+
+      // year-by-year table
+      const yrs = [];
+      if (n > 0) {
+        const last = Math.min(Math.ceil(n - 1e-9), 200);
+        for (let y = 1; y <= last; y++) {
+          const t = Math.min(y, n), t0 = y - 1, open = pv * growthF(r, t0, m), close = pv * growthF(r, t, m);
+          yrs.push([t, open, close - open, close, pv * (1 + r * t), 1 / growthF(r, t, m)]);
+        }
+      }
+      const X = (x, d = 6) => F.plain(x, d);
+      const excel = cont ? { fv: `=${X(pv, 2)}*EXP(${X(r)}*${X(n, 4)})`, pv: `=${X(fv, 2)}*EXP(-${X(r)}*${X(n, 4)})`, r: `=LN(${X(fv, 2)}/${X(pv, 2)})/${X(n, 4)}`, n: `=LN(${X(fv, 2)}/${X(pv, 2)})/${X(r)}` }[s]
+        : { fv: `=FV(${X(r)}/${m}, ${m}*${X(n, 4)}, 0, -${X(pv, 2)})`, pv: `=PV(${X(r)}/${m}, ${m}*${X(n, 4)}, 0, -${X(fv, 2)})`, r: `=${m}*RATE(${m}*${X(n, 4)}, 0, -${X(pv, 2)}, ${X(fv, 2)})`, n: `=NPER(${X(r)}/${m}, 0, -${X(pv, 2)}, ${X(fv, 2)})/${m}` }[s];
+
+      return {
+        solved: { pv, fv, r: r * 100, n },
+        kpis: [
+          { k: solvedName, v: solvedVal, raw: { fv, pv, r, n }[s], s: solvedSub, cls: 'good', big: true },
+          { k: 'Effective annual rate (EAR)', v: pct(ear, 4), raw: ear, s: `APR ${pct(r, 3)}, ${cont ? 'continuous' : freqName(m).toLowerCase()}` },
+          { k: 'Interest earned', v: money(fv - pv, 2), raw: fv - pv, s: `Total growth ${pct(fv / pv - 1, 2)}` },
+          { k: 'Discount factor', v: num(pv / fv, 6), raw: pv / fv, s: `PV of $1 due in ${num(n, 2)} yrs` },
+          { k: 'Doubling time', v: isFinite(dbl) ? num(dbl, 2) + ' yrs' : 'never', raw: dbl, s: r > 0 ? `Rule of 72: ${num(72 / (r * 100), 2)} yrs` : '' }
+        ],
+        charts: [
+          { id: 'growth', title: 'Compound vs simple interest', note: 'Compound interest earns interest on past interest, so the gap with simple interest widens over time.' + (steps.length ? ' Dots: the balance on each compounding date.' : ''),
+            build: T => ({ type: 'line', data: { datasets: [
+              ds('Compound interest', pts(xs, xs.map(t => pv * growthF(r, t, m))), T.c[0], { borderWidth: 3 }),
+              ds('Simple interest', pts(xs, xs.map(t => pv * (1 + r * t))), T.c[2], { borderWidth: 2, borderDash: [6, 4] })]
+              .concat(steps.length ? [Object.assign(ds('Compounding dates', steps.map(t => ({ x: t, y: pv * growthF(r, t, m) })), T.c[0]), { type: 'scatter', pointRadius: 3, showLine: false })] : [])
+              .concat([marker('PV', 0, pv, T.c[1]), marker('FV', n, fv, T.c[4], { pointStyle: 'rectRot' })]) },
+              options: lineOpts(T, { xTitle: 'Years', yTitle: 'Value ($)', xFmt: x => num(x, 2), yFmt: x => money(x, 2) }) }) },
+          { id: 'freq', title: byPV ? 'Present value needed today, by compounding frequency' : 'Interest earned, by compounding frequency', note: `Same APR (${pct(r, 3)}) and the same ${num(n, 2)} years; only the compounding frequency changes. More frequent compounding ${byPV ? 'lowers the amount needed today' : 'earns more interest'}, up to the limit of continuous compounding.`,
+            build: T => ({ type: 'bar', data: { labels: FREQS.map(f => f[1].replace(/ \(.*\)/, '')), datasets: [{ label: byPV ? 'Present value' : 'Interest earned', data: byPV ? fqPV : fqFV.map(x => x - pv), backgroundColor: FREQS.map((_, k) => k === cur ? T.c[1] : T.alpha(T.c[0], .8)), borderRadius: 4 }] },
+              options: { plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => ' ' + money(c.parsed.y, 2) + '  (EAR ' + pct(earOf(r, fq[c.dataIndex]), 4) + ')' } } }, scales: { x: { grid: { display: false } }, y: { beginAtZero: true, ticks: { callback: x => money(x, 0) }, grid: { color: T.grid } } } } }) }
+        ],
+        tables: [
+          { id: 'freqtbl', title: 'The effect of compounding frequency (same APR)', columns: [{ h: 'Compounding', num: false }, { h: 'Periodic rate', fmt: x => typeof x === 'string' ? x : pct(x, 6) }, { h: 'Periods', fmt: x => typeof x === 'string' ? x : num(x, 2) }, { h: 'EAR', fmt: x => pct(x, 4) }, { h: 'FV of PV', fmt: x => money(x, 2) }, { h: 'PV of FV', fmt: x => money(x, 2) }],
+            rows: fq.map((q, k) => [FREQS[k][1], q === 'c' ? 'continuous' : r / q, q === 'c' ? '∞' : q * n, fqOk[k] ? earOf(r, q) : NaN, fqFV[k], fqPV[k]]), hl: [cur],
+            note: `FV of PV: what ${money(pv, 2)} grows to in ${num(n, 2)} years. PV of FV: what ${money(fv, 2)} due in ${num(n, 2)} years is worth today.` },
+          { id: 'years', title: 'Year-by-year growth' + (n > 200 ? ' (first 200 years)' : ''), columns: [{ h: 'Year', fmt: x => num(x, Number.isInteger(x) ? 0 : 2) }, { h: 'Opening value', fmt: x => money(x, 2) }, { h: 'Interest', fmt: x => money(x, 2) }, { h: 'Closing value', fmt: x => money(x, 2) }, { h: 'Simple-interest value', fmt: x => money(x, 2) }, { h: 'Discount factor', fmt: x => num(x, 6) }], rows: yrs,
+            note: 'Discount factor = the present value of $1 received at the end of that year.' }
+        ],
+        steps: [
+          { h: '1. Periodic rate and number of periods', f: [cont ? 'Continuous compounding: (1 + r/m)<sup>m·n</sup> → e<sup>r·n</sup> as m → ∞' : 'i = r / m, &nbsp; N = m · n'], calc: cont ? `r = ${pct(r, 4)}, n = ${num(n, 4)} years` : `${iTxt},  N = ${m} × ${num(n, 4)} = ${num(m * n, 4)}` },
+          solveStep,
+          { h: '3. Effective annual rate', f: [cont ? 'EAR = e<sup>r</sup> − 1' : 'EAR = (1 + r/m)<sup>m</sup> − 1'], calc: cont ? `EAR = e^${num(r, 6)} − 1 = ${pct(ear, 6)}` : `EAR = (1 + ${num(r / m, 8)})^${m} − 1 = ${pct(ear, 6)}`, note: 'The EAR is the rate that, compounded once a year, gives the same growth. Use it to compare rates quoted with different compounding frequencies.' },
+          { h: '4. Doubling time and the rule of 72', f: [cont ? 'T<sub>2</sub> = ln 2 / r' : 'T<sub>2</sub> = ln 2 / [m · ln(1 + r/m)] &nbsp; ≈ &nbsp; 72 / (r × 100)'], calc: isFinite(dbl) ? `T₂ = 0.693147 / ${num(gl, 6)} = ${num(dbl, 4)} years;  rule of 72: ${num(72 / (r * 100), 4)} years` : 'The amount never doubles at a zero or negative rate.' },
+          { h: '5. In Excel', f: [excel], note: cont ? 'Excel has no built-in function for continuous compounding; use EXP and LN.' : 'Excel uses a cash-flow sign convention: money you pay out (the deposit) is negative and money you receive is positive.' }
+        ]
+      };
+    }
+  });
+
+  /* =====================================================================
+     TIME VALUE OF MONEY 2. ANNUITIES & PERPETUITIES (v2.6)
+     ===================================================================== */
+  // PV of N payments (first payment = 1) at periodic rate i, payments growing by gp per period; due = payments at the start of each period.
+  // Uses (q^N − 1) / ((1 + i)(q − 1)) with q = (1 + gp)/(1 + i), written with expm1 so it stays accurate when i ≈ gp.
+  function annPVF(i, N, gp, due) {
+    const x = Math.log1p(gp) - Math.log1p(i);
+    const f = x === 0 ? N / (1 + i) : Math.expm1(N * x) / ((1 + i) * Math.expm1(x));
+    return f * (due ? 1 + i : 1);
+  }
+  const annFVF = (i, N, gp, due) => annPVF(i, N, gp, due) * Math.pow(1 + i, N);
+  const sumPay = (N, gp) => { const l = Math.log1p(gp); return l === 0 ? N : Math.expm1(N * l) / Math.expm1(l); };
+  const annS = v => v.kind === 'perp' ? v.solveP : v.solveA;
+  const annLump = v => v.kind !== 'perp' && ['pmt', 'n', 'r'].includes(v.solveA);
+
+  TOOLS.push({
+    id: 'annuity', cat: 'tvm', icon: 'annuity', title: 'Annuities & Perpetuities', short: 'Annuities', isNew: true,
+    desc: 'Ordinary annuities, annuities due, growing annuities and perpetuities. Solve for PV, FV, the payment, the number of years or the rate.',
+    long: 'An annuity is a series of equal (or steadily growing) payments made at regular intervals. Payments at the end of each period form an ordinary annuity; payments at the start form an annuity due. A perpetuity pays forever.',
+    inputs: [
+      { id: 'kind', label: 'Cash-flow stream', type: 'seg', value: 'annuity', options: [['annuity', 'Annuity'], ['perp', 'Perpetuity']] },
+      { id: 'timing', label: 'Payment timing', type: 'seg', value: 'end', options: [['end', 'End (ordinary)'], ['begin', 'Beginning (due)']] },
+      { id: 'solveA', label: 'Solve for', type: 'select', value: 'pv', options: [['pv', 'Present & future value'], ['pmt', 'Payment (PMT)'], ['n', 'Number of years (n)'], ['r', 'Interest rate (r)']], showIf: v => v.kind !== 'perp' },
+      { id: 'solveP', label: 'Solve for', type: 'select', value: 'pv', options: [['pv', 'Present value (PV)'], ['pmt', 'Payment (PMT)'], ['r', 'Interest rate (r)']], showIf: v => v.kind === 'perp' },
+      { id: 'given', label: 'Known amount', type: 'seg', value: 'pv', options: [['pv', 'Present value'], ['fv', 'Future value']], showIf: annLump, hint: 'Present value: e.g. a loan or the price of a pension. Future value: e.g. a savings target.' },
+      { id: 'pmt', label: 'Payment per period PMT', unit: '$', value: 1000, disabledIf: v => annS(v) === 'pmt', hint: 'For a growing stream, the first payment.' },
+      { id: 'pv', label: 'Present value PV', unit: '$', value: 8000, disabledIf: v => v.kind === 'perp' ? v.solveP === 'pv' : !(annLump(v) && v.given === 'pv') },
+      { id: 'fv', label: 'Future value FV', unit: '$', value: 15000, showIf: v => v.kind !== 'perp', disabledIf: v => !(annLump(v) && v.given === 'fv') },
+      { id: 'r', label: 'Annual interest rate r (nominal, APR)', unit: '%', value: 5, step: 0.05, disabledIf: v => annS(v) === 'r' },
+      { id: 'n', label: 'Number of years n', unit: 'years', value: 10, step: 1, showIf: v => v.kind !== 'perp', disabledIf: v => annS(v) === 'n' },
+      { id: 'm', label: 'Payments (and compounding) per year', type: 'select', value: '1', options: [['1', 'Annual (1)'], ['2', 'Semi-annual (2)'], ['4', 'Quarterly (4)'], ['12', 'Monthly (12)']] },
+      { id: 'g', label: 'Payment growth rate g (per year)', unit: '%', value: 0, step: 0.25, hint: '0 = level payments. Otherwise each payment is (1 + g/m) times the previous one. A growing perpetuity needs r > g.' }
+    ],
+    compute(v) {
+      const perp = v.kind === 'perp', due = v.timing === 'begin', s = annS(v), given = annLump(v) ? v.given : null;
+      const m = parseInt(v.m), gp = (v.g || 0) / 100 / m;
+      let pmt = v.pmt, pv = v.pv, fv = v.fv, i = v.r / 100 / m, N = perp ? Infinity : v.n * m;
+      const tName = due ? 'annuity due' : 'ordinary annuity';
+      if (!(gp > -1)) return { error: 'The growth rate must be above −100% per period.' };
+      if (s !== 'pmt' && !(pmt > 0)) return { error: 'The payment must be positive.' };
+      if (s !== 'r' && !(i > -1)) return { error: `The rate must be above −${num(100 * m, 0)}% for this payment frequency.` };
+      if (!perp && s !== 'n' && !(N > 0)) return { error: 'The number of years must be positive.' };
+      if (!perp && s !== 'n' && N > 6000) return { error: 'Please use at most 6,000 payments.' };
+      if ((perp ? s !== 'pv' : given === 'pv') && !(pv > 0)) return { error: 'The present value must be positive.' };
+      if (given === 'fv' && !(fv > 0)) return { error: 'The future value must be positive.' };
+
+      const growTxt = gp !== 0;
+      const warnings = [];
+      let solveStep = null;
+      if (perp) {
+        // PV = PMT·(1 + i·due)/(i − g)
+        if (s === 'pv' || s === 'pmt') {
+          if (!(i > gp)) return { error: `A ${growTxt ? 'growing ' : ''}perpetuity has a finite value only if the rate per period (${pct(i, 4)}) is above the growth rate (${pct(gp, 4)}).` };
+          const fac = (due ? 1 + i : 1) / (i - gp);
+          if (s === 'pv') pv = pmt * fac; else pmt = pv / fac;
+          if (s === 'pmt') solveStep = { h: '3. Payment', f: ['PMT = PV / [(1 + i·d) / (i − g)]'], calc: `PMT = ${num(pv, 2)} / ${num(fac, 6)} = ${num(pmt, 4)}` };
+        } else {
+          if (due && !(pv > pmt)) return { error: 'For a perpetuity due the present value must exceed the first payment.' };
+          i = due ? (pmt + pv * gp) / (pv - pmt) : pmt / pv + gp;
+          solveStep = { h: '3. Interest rate', f: [due ? 'PV = PMT·(1 + i)/(i − g) &nbsp;⇒&nbsp; i = (PMT + PV·g) / (PV − PMT)' : 'i = PMT / PV + g'], calc: `i = ${due ? `(${num(pmt, 2)} + ${num(pv, 2)} × ${num(gp, 6)}) / (${num(pv, 2)} − ${num(pmt, 2)})` : `${num(pmt, 2)} / ${num(pv, 2)} + ${num(gp, 6)}`} = ${pct(i, 6)} per period;  r = i × m = ${pct(i * m, 6)}` };
+        }
+      } else if (s === 'pv') {
+        pv = pmt * annPVF(i, N, gp, due); fv = pmt * annFVF(i, N, gp, due);
+      } else if (s === 'pmt') {
+        const fac = given === 'pv' ? annPVF(i, N, gp, due) : annFVF(i, N, gp, due);
+        pmt = (given === 'pv' ? pv : fv) / fac;
+        solveStep = { h: '4. Payment', f: [given === 'pv' ? 'PMT = PV / PV annuity factor' : 'PMT = FV / FV annuity factor'], calc: `PMT = ${num(given === 'pv' ? pv : fv, 2)} / ${num(fac, 8)} = ${num(pmt, 4)}` };
+      } else if (s === 'n') {
+        const target = given === 'pv' ? pv : fv, fac = given === 'pv' ? (k => annPVF(i, k, gp, due)) : (k => annFVF(i, k, gp, due));
+        const f = k => pmt * fac(k) - target;
+        if (given === 'pv' && i > gp && target >= pmt * (due ? 1 + i : 1) / (i - gp)) return { error: `The present value is at least the value of a perpetuity with the same payments (${money(pmt * (due ? 1 + i : 1) / (i - gp), 2)}): no number of payments is enough.` };
+        let hi = 1; while (isFinite(f(hi)) && f(hi) < 0 && hi < 1e7) hi *= 2;
+        N = F.brent(f, 0, hi);
+        if (!isFinite(N)) return { error: 'No number of payments matches these values.' };
+        if (N > 6000) return { error: `This needs ${num(N, 0)} payments; please use inputs that need at most 6,000.` };
+        const lvl = gp === 0 && Math.abs(i) > 1e-12, a = pmt * (due ? 1 + i : 1);
+        solveStep = { h: '4. Number of payments', f: lvl ? [given === 'pv' ? `N = −ln[1 − PV·i / (PMT${due ? '·(1 + i)' : ''})] / ln(1 + i)` : `N = ln[1 + FV·i / (PMT${due ? '·(1 + i)' : ''})] / ln(1 + i)`] : ['Solve PMT × annuity factor(N) = ' + (given === 'pv' ? 'PV' : 'FV') + ' for N (Brent root-finding)'],
+          calc: (lvl ? (given === 'pv' ? `N = −ln[1 − ${num(pv, 2)} × ${num(i, 8)} / ${num(a, 4)}] / ln(${num(1 + i, 8)})` : `N = ln[1 + ${num(fv, 2)} × ${num(i, 8)} / ${num(a, 4)}] / ln(${num(1 + i, 8)})`) + ' = ' : 'N = ') + `${num(N, 4)} payments = ${num(N / m, 4)} years` };
+        if (Math.abs(N - Math.round(N)) > 1e-6) warnings.push(`The answer is not a whole number of payments (${num(N, 3)}). In practice you would make ${Math.floor(N)} full payments plus a smaller final one, or ${Math.ceil(N)} full payments that slightly overshoot the target.`);
+      } else {
+        const target = given === 'pv' ? pv : fv;
+        const f = given === 'pv' ? (x => pmt * annPVF(x, N, gp, due) - target) : (x => pmt * annFVF(x, N, gp, due) - target);
+        const roots = F.allRoots(f, -0.99, 10, 4000);
+        if (!roots.length) return { error: 'No interest rate between −99% and 1,000% per period matches these values.' };
+        i = roots[0];
+        solveStep = { h: '4. Interest rate', f: ['Find i such that PMT × annuity factor(i) = ' + (given === 'pv' ? 'PV' : 'FV') + '; there is no closed form, so it is solved numerically (Brent)'], calc: `i = ${pct(i, 6)} per period;  r = i × m = ${pct(i * m, 6)} (APR)` };
+      }
+      if (!perp && s !== 'pv') { pv = pmt * annPVF(i, N, gp, due); fv = pmt * annFVF(i, N, gp, due); }
+      const r = i * m, ear = Math.expm1(m * Math.log1p(i));
+
+      // KPIs
+      const bigM = x => money(x, Math.abs(x) >= 1e5 ? 0 : 2);
+      const sv = { pv: ['Present value', bigM(pv), pv], pmt: ['Payment per period', bigM(pmt), pmt], n: ['Years needed', num(N / m, 4) + ' yrs', N / m], r: ['Interest rate (APR)', pct(r, 4), r] }[s];
+      const kpis = [{ k: sv[0], v: sv[1], raw: sv[2], s: s === 'n' ? `${num(N, 3)} payments` : s === 'r' ? `${pct(i, 4)} per period` : perp ? (growTxt ? 'Growing perpetuity' : 'Level perpetuity') + (due ? ', due' : '') : (growTxt ? 'Growing ' : '') + tName, cls: 'good', big: true }];
+      let total = NaN;
+      if (perp) {
+        const y10 = Math.min(1, pmt * annPVF(i, 10 * m, gp, due) / pv);
+        if (s !== 'pv') kpis.push({ k: 'Present value', v: money(pv, 2), raw: pv });
+        if (s !== 'pmt') kpis.push({ k: growTxt ? 'First payment' : 'Payment per period', v: money(pmt, 2), raw: pmt, s: growTxt ? `growing ${pct(gp, 3)} per period` : '' });
+        kpis.push({ k: 'Effective annual rate', v: pct(ear, 4), raw: ear, s: `APR ${pct(r, 3)}, ${m}× a year` });
+        kpis.push({ k: 'Share of PV from the first 10 years', v: pct(y10, 2), raw: y10, s: 'The rest comes from payments after year 10' });
+      } else {
+        total = pmt * sumPay(N, gp);
+        if (s !== 'pv') kpis.push({ k: 'Present value', v: money(pv, 2), raw: pv });
+        kpis.push({ k: 'Future value', v: money(fv, 2), raw: fv, s: `at the end of year ${num(N / m, 2)}` });
+        if (s !== 'pmt') kpis.push({ k: growTxt ? 'First payment' : 'Payment per period', v: money(pmt, 2), raw: pmt, s: growTxt ? `last ${money(pmt * Math.pow(1 + gp, Math.ceil(N) - 1), 2)}` : `${m}× a year` });
+        kpis.push({ k: 'Total of payments', v: money(total, 2), raw: total, s: `Interest in FV: ${money(fv - total, 2)}` });
+        kpis.push({ k: 'Effective annual rate', v: pct(ear, 4), raw: ear, s: `APR ${pct(r, 3)}, ${m}× a year` });
+      }
+
+      // schedules
+      const charts = [], tables = [];
+      const dfOf = t => Math.pow(1 + i, -t);
+      if (perp) {
+        let P = 0, rows = [], hz = 0; const maxP = 300 * m;
+        for (let t = 1; t <= maxP; t++) {
+          const when = due ? t - 1 : t, pay = pmt * Math.pow(1 + gp, t - 1), d = dfOf(when);
+          P += pay * d; rows.push([t, when / m, pay, d, pay * d, P, P / pv]);
+          if (!hz && P >= 0.99 * pv) hz = t;
+          if (hz && t >= Math.max(hz, 10 * m)) break;
+        }
+        const stp = Math.ceil(rows.length / 600), show = rows.filter((rw, k) => k % stp === 0 || k === rows.length - 1);
+        charts.push({ id: 'conv', title: 'Cumulative PV of the payments approaches the perpetuity value', note: 'Distant payments are worth very little today, which is why an infinite stream has a finite value.' + (hz ? ` 99% of the value comes from the first ${num(hz / m, 1)} years.` : ' Even after 300 years the payments have not reached 99% of the value (the rate is close to the growth rate).'),
+          build: T => ({ type: 'line', data: { datasets: [
+            ds('Cumulative PV', [{ x: 0, y: 0 }].concat(show.map(rw => ({ x: rw[0] / m, y: rw[5] }))), T.c[0], { borderWidth: 3, fill: 'origin', backgroundColor: T.alpha(T.c[0], .10) }),
+            ds('Perpetuity value', pts([0, show[show.length - 1][0] / m], [pv, pv]), T.c[1], { borderWidth: 2, borderDash: [6, 4] }),
+            ds('PV of each payment (right axis)', show.map(rw => ({ x: rw[0] / m, y: rw[4] })), T.c[2], { borderWidth: 2, yAxisID: 'y2' })] },
+            options: (o => { o.scales.y2 = { type: 'linear', position: 'right', beginAtZero: true, title: { display: true, text: 'PV of each payment ($)' }, ticks: { callback: x => money(x, 0) }, grid: { display: false } }; return o; })(lineOpts(T, { xTitle: 'Years', yTitle: 'Cumulative PV ($)', xFmt: x => num(x, 2), yFmt: x => money(x, 2), beginAtZero: true })) }) });
+        tables.push({ id: 'perp', title: `First ${num(rows.length, 0)} payments`, columns: [{ h: 'Payment no.', fmt: x => num(x, 0) }, { h: 'Paid at (yrs)', fmt: x => num(x, 3) }, { h: 'Payment', fmt: x => money(x, 2) }, { h: 'Discount factor', fmt: x => num(x, 6) }, { h: 'PV', fmt: x => money(x, 2) }, { h: 'Cumulative PV', fmt: x => money(x, 2) }, { h: '% of value', fmt: x => pct(x, 2) }], rows,
+          note: 'The table stops once the payments shown account for 99% of the value (and at least 10 years).' });
+      } else {
+        const Nw = Math.abs(N - Math.round(N)) < 1e-6 ? Math.round(N) : Math.floor(N), cap = Math.min(Nw, 1200);
+        let B = 0, cumPV = 0, cumPay = 0; const rows = [], yr = [];
+        for (let t = 1; t <= Nw; t++) {
+          const pay = pmt * Math.pow(1 + gp, t - 1), when = due ? t - 1 : t, d = dfOf(when);
+          const int = (B + (due ? pay : 0)) * i;
+          B = B + int + pay; cumPV += pay * d; cumPay += pay;
+          if (t <= cap) rows.push([t, when / m, pay, d, pay * d, cumPV, int, B]);
+          if (t % m === 0 || t === Nw) yr.push([Math.ceil(t / m), cumPay, B - cumPay, B]);
+        }
+        if (Nw === Math.round(N) && Nw <= 1200) rows.push(['Total', total, '', '', pv, '', fv - total, fv]);
+        const fewP = Nw <= 60;
+        const pvBars = fewP ? rows.filter(rw => rw[0] !== 'Total').map(rw => [String(rw[0]), rw[2], rw[4]]) : (() => { const a = []; for (let y = 1; y <= Math.ceil(Nw / m); y++) { let p = 0, q = 0; for (let t = (y - 1) * m + 1; t <= Math.min(y * m, Nw); t++) { const pay = pmt * Math.pow(1 + gp, t - 1); p += pay; q += pay * dfOf(due ? t - 1 : t); } a.push(['Y' + y, p, q]); } return a; })();
+        charts.push({ id: 'accum', title: 'How the future value builds up', note: 'End-of-year balance if every payment is invested at the interest rate: your payments plus the interest they earn. The final balance is the future value.',
+          build: T => ({ type: 'bar', data: { labels: yr.map(rw => 'Y' + rw[0]), datasets: [{ label: 'Payments made', data: yr.map(rw => rw[1]), backgroundColor: T.alpha(T.c[0], .85), stack: 's' }, { label: 'Interest earned', data: yr.map(rw => rw[2]), backgroundColor: T.alpha(T.c[1], .85), stack: 's' }] },
+            options: { plugins: { legend: { position: 'bottom' }, tooltip: { mode: 'index', callbacks: { label: c => ' ' + c.dataset.label + ': ' + money(c.parsed.y, 2), footer: it => 'Balance: ' + money(yr[it[0].dataIndex][3], 2) } } }, scales: { x: { stacked: true, grid: { display: false } }, y: { stacked: true, ticks: { callback: x => money(x, 0) }, grid: { color: T.grid } } } } }) });
+        charts.push({ id: 'pvbars', title: fewP ? 'Each payment and its present value' : 'Payments and their present value, by year', note: 'The later a payment arrives, the less it is worth today. The present value of the annuity is the sum of the dark bars.',
+          build: T => ({ type: 'bar', data: { labels: pvBars.map(b => b[0]), datasets: [{ label: 'Payment', data: pvBars.map(b => b[1]), backgroundColor: T.alpha(T.c[2], .5), borderRadius: 3, grouped: false, order: 2 }, { label: 'Present value', data: pvBars.map(b => b[2]), backgroundColor: T.alpha(T.c[0], .9), borderRadius: 3, grouped: false, order: 1, barPercentage: 0.55 }] },
+            options: { plugins: { legend: { position: 'bottom' }, tooltip: { mode: 'index', callbacks: { label: c => ' ' + c.dataset.label + ': ' + money(c.parsed.y, 2) } } }, scales: { x: { grid: { display: false }, title: { display: true, text: fewP ? 'Payment number' : 'Year' } }, y: { beginAtZero: true, ticks: { callback: x => money(x, 0) }, grid: { color: T.grid } } } } }) });
+        tables.push({ id: 'sched', title: 'Payment schedule' + (Nw > 1200 ? ' (first 1,200 payments)' : '') + (Nw !== Math.round(N) ? ` (${Nw} full payments)` : ''), columns: [{ h: 'Payment no.', fmt: x => typeof x === 'string' ? x : num(x, 0) }, { h: 'Paid at (yrs)', fmt: x => num(x, 3) }, { h: 'Payment', fmt: x => money(x, 2) }, { h: 'Discount factor', fmt: x => num(x, 6) }, { h: 'PV of payment', fmt: x => money(x, 2) }, { h: 'Cumulative PV', fmt: x => money(x, 2) }, { h: 'Interest earned', fmt: x => money(x, 2) }, { h: 'Balance (FV account)', fmt: x => money(x, 2) }], rows, hl: rows.length && rows[rows.length - 1][0] === 'Total' ? [rows.length - 1] : [],
+          note: `Paid at: time of the payment in years (${due ? 'start' : 'end'} of each period). Balance: value of all payments so far, invested at ${pct(i, 4)} per period, at the end of the period.` });
+      }
+
+      // formulas
+      const dTxt = due ? ' × (1 + i)' : '';
+      const fPV = perp ? (growTxt ? `PV = PMT${due ? ' · (1 + i)' : ''} / (i − g)` : (due ? 'PV = PMT · (1 + i) / i = PMT + PMT / i' : 'PV = PMT / i'))
+        : growTxt ? `PV = PMT / (i − g) · [1 − ((1 + g) / (1 + i))<sup>N</sup>]${dTxt}` : `PV = PMT · [1 − (1 + i)<sup>−N</sup>] / i${dTxt}`;
+      const facPV = perp ? (due ? 1 + i : 1) / (i - gp) : annPVF(i, N, gp, due);
+      const stepsArr = [
+        { h: '1. Rates per period' + (perp ? '' : ' and number of payments'), f: ['i = r / m' + (growTxt ? ', &nbsp; g = growth per year / m' : '') + (perp ? '' : ', &nbsp; N = m · n')], calc: `i = ${pct(r, 4)} / ${m} = ${pct(i, 6)}` + (growTxt ? `,  g = ${num(v.g, 4)}% / ${m} = ${pct(gp, 6)}` : '') + (perp ? '' : `,  N = ${num(N, 4)}`) },
+        { h: '2. Present value' + (perp ? ' of the perpetuity' : ` of the ${growTxt ? 'growing ' : ''}${tName}`), f: [fPV].concat(due && !perp ? ['Annuity due: each payment arrives one period earlier, so its value is (1 + i) times the ordinary annuity.'] : []),
+          calc: (perp ? (growTxt || due ? `PV = ${num(pmt, 2)}${due ? ` × ${num(1 + i, 8)}` : ''} / (${num(i, 8)} − ${num(gp, 8)})` : `PV = ${num(pmt, 2)} / ${num(i, 8)}`) : `PV = ${num(pmt, 2)} × ${num(facPV, 8)}`) + ` = ${num(pv, 4)}`,
+          note: perp ? (growTxt ? 'Valid only if i > g; the Gordon growth (dividend discount) model is this formula.' : '') : 'PV annuity factor = ' + num(facPV, 8) + ' (the PV of $1 per period' + (growTxt ? ', growing at g' : '') + ').' }
+      ];
+      if (!perp) stepsArr.push({ h: '3. Future value', f: ['FV = PV · (1 + i)<sup>N</sup>'].concat(!growTxt ? [`FV = PMT · [(1 + i)<sup>N</sup> − 1] / i${dTxt}`] : []), calc: `FV = ${num(pv, 4)} × ${num(1 + i, 8)}^${num(N, 4)} = ${num(fv, 4)}`, note: 'The FV is the balance at the end of the last period if every payment is invested at i.' });
+      if (solveStep) stepsArr.push(solveStep);
+      const ty = due ? 1 : 0, X = (x, d = 6) => F.plain(x, d), XN = X(N, 4);
+      const ex = perp || growTxt ? null : { pv: `=PV(${X(r)}/${m}, ${XN}, -${X(pmt, 2)}, 0, ${ty})  and  =FV(${X(r)}/${m}, ${XN}, -${X(pmt, 2)}, 0, ${ty})`, pmt: `=PMT(${X(r)}/${m}, ${XN}, ${given === 'pv' ? `-${X(pv, 2)}, 0` : `0, -${X(fv, 2)}`}, ${ty})`, n: `=NPER(${X(r)}/${m}, -${X(pmt, 2)}, ${given === 'pv' ? `${X(pv, 2)}, 0` : `0, ${X(fv, 2)}`}, ${ty})/${m}`, r: `=${m}*RATE(${XN}, -${X(pmt, 2)}, ${given === 'pv' ? `${X(pv, 2)}, 0` : `0, ${X(fv, 2)}`}, ${ty})` }[s];
+      stepsArr.push({ h: stepsArr.length + 1 + '. In Excel', f: [ex || (perp ? `=${X(pmt, 2)}${due ? `*(1+${X(i, 8)})` : ''}/(${X(i, 8)}${growTxt ? `-${X(gp, 8)}` : ''})` : 'Excel has no growing-annuity function: list the payments in a column and use =NPV(i, range)' + (due ? '*(1+i)' : '') + ', or type the formula above.')],
+        note: ex ? 'Last argument: 0 = payments at the end of each period, 1 = at the beginning. Excel signs: money paid out is negative, money received is positive.' : '' });
+
+      return { warnings, kpis, charts, tables, steps: stepsArr, solved: perp ? { pv, pmt, r: r * 100 } : { pv, fv, pmt, r: r * 100, n: N / m },
+        refs: 'Brealey, R. A., Myers, S. C. and Allen, F. <i>Principles of Corporate Finance</i>, chapter 2. Gordon, M. J. (1959). Dividends, earnings, and stock prices. <i>Review of Economics and Statistics</i>, 41(2).' };
     }
   });
 

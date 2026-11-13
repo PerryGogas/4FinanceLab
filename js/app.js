@@ -139,7 +139,7 @@
           <line x1="250" y1="10" x2="250" y2="90"/><rect x="242" y="25" width="16" height="45"/></g>
         </svg>
         <h1>4Finance Lab</h1>
-        <p>Interactive tools and calculators for corporate finance, fixed income, derivatives and risk management. Every tool shows its formulas step by step, draws interactive charts, and exports to Excel and PNG.</p>
+        <p>Interactive tools and calculators for the time value of money, corporate finance, fixed income, derivatives and risk management. Every tool shows its formulas step by step, draws interactive charts, and exports to Excel and PNG.</p>
         <div class="chips"><span>${TOOLS.length} tools</span><span>Step-by-step formulas</span><span>Excel &amp; PNG export</span><span>Works offline</span><span>by Prof. Periklis Gogas</span></div>
       </div>`;
     CATS.forEach(c => {

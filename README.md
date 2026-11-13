@@ -10,6 +10,8 @@
 
 | Area | Tool | What it does |
 |---|---|---|
+| Time Value of Money | Present & Future Value | Compound or discount a single amount; solve for PV, FV, rate or years; any compounding frequency incl. continuous; EAR, rule of 72 |
+| Time Value of Money | Annuities & Perpetuities | Ordinary, due and growing annuities and perpetuities; solve for PV/FV, payment, years or rate; payment schedule |
 | Credit & Distress | Altman Z-Score Analyzer | Z (public), Z' (private) and Z'' (non-manufacturing) with zone classification |
 | Credit & Distress | Bankruptcy Risk Analyzer | Ohlson (1980) O-Score probability of failure with Altman Z alongside |
 | Fixed Income | Bond Pricing Engine | Coupon, zero-coupon and perpetual bonds; solve for price, YTM, coupon, face or maturity |
@@ -51,7 +53,7 @@ When you release changes later, bump `VERSION` at the top of `sw.js` so installe
 index.html              App shell
 css/styles.css          Styles (light/dark themes, print layout)
 js/math.js              Numerical routines (normal cdf/inverse, Brent root finder, seeded RNG)
-js/tools.js             The 12 tools: inputs, calculations, charts, tables, formulas
+js/tools.js             The 15 tools: inputs, calculations, charts, tables, formulas
 js/app.js               Menu, routing, rendering, export, print
 lib/                    Chart.js 4.4.4 and SheetJS 0.18.5 (with licenses)
 icons/                  App icon (SVG/PNG), maskable icon, social thumbnail, screenshot
