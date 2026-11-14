@@ -1936,7 +1936,10 @@
 
       /* ---------------- annuity: PV·(1+i)^N + PMT·FVA + FV = 0 (Excel / calculator sign convention) ---------------- */
       const G = (ii, NN) => Math.pow(1 + ii, NN), A = (ii, NN) => annFVF(ii, NN, gp, due);
-      const signHint = 'Check the signs: money received is positive and money paid out is negative, so the amounts cannot all have the same sign.';
+      const solving = `You left the ${NAMES[s]} box empty, so the ${NAMES[s]} is what is being calculated. `;
+      const amts = [['PV', pv], ['PMT', pmt], ['FV', fv]].filter(a => isFinite(a[1]) && a[1] !== 0);
+      const same = amts.length && (amts.every(a => a[1] > 0) || amts.every(a => a[1] < 0));
+      const signHint = same ? `${amts.map(a => a[0]).join(' and ')} ${amts.length === 2 ? 'are both' : amts.length > 2 ? 'are all' : 'is'} ${amts[0][1] > 0 ? 'positive (money you receive)' : 'negative (money you pay out)'}, and no interest rate can balance amounts that all flow the same way. If one of them is money you pay (for example the price of the annuity), enter it with a minus sign. To find a different value, fill in this box and leave that one empty instead.` : 'Check the amounts and their signs: money received is positive, money paid out is negative.';
       let solveStep;
       if (s === 'pv') {
         pv = -(pmt * A(i, N) + fv) / G(i, N);
@@ -1951,7 +1954,7 @@
       } else if (s === 'n') {
         const f = k => pv * G(i, k) + pmt * A(i, k) + fv;
         const roots = F.allRoots(f, 1e-9, 6000, 6000).filter(x => x > 1e-7);
-        if (!roots.length) return { error: 'No number of payments (up to 6,000) solves this. ' + signHint };
+        if (!roots.length) return { error: solving + 'No number of payments (up to 6,000) works with these amounts. ' + signHint };
         N = roots[0];
         const k = pmt * (due ? 1 + i : 1) / i, closed = gp === 0 && Math.abs(i) > 1e-12 && pmt !== 0;
         solveStep = { h: '3. Number of payments', f: closed ? [`N = ln[(PMT${due ? '·(1 + i)' : ''}/i − FV) / (PV + PMT${due ? '·(1 + i)' : ''}/i)] / ln(1 + i)`] : ['Solve PV · (1 + i)<sup>N</sup> + PMT · FVA(N) + FV = 0 for N (Brent root-finding)'],
@@ -1960,7 +1963,7 @@
       } else {
         const f = ii => pv * G(ii, N) + pmt * A(ii, N) + fv;
         const roots = F.allRoots(f, -0.99, 10, 4000);
-        if (!roots.length) return { error: 'No interest rate between −99% and 1,000% per period solves this. ' + signHint };
+        if (!roots.length) return { error: solving + 'No interest rate between −99% and 1,000% per period works with these amounts. ' + signHint };
         roots.sort((a, b) => Math.abs(a) - Math.abs(b)); i = roots[0];
         if (roots.length > 1) warnings.push(`More than one rate solves this (${roots.map(x => pct(x * m, 3)).join(', ')} a year); the one closest to zero is shown.`);
         solveStep = { h: '3. Interest rate', f: ['Find i such that PV · (1 + i)<sup>N</sup> + PMT · FVA(i) + FV = 0; there is no closed form, so it is solved numerically (Brent)'], calc: `i = ${pct(i, 6)} per period;  r = i × m = ${pct(i * m, 6)} (APR)` };
