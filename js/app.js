@@ -1,6 +1,9 @@
 /* 4Finance Lab - application shell: menu, routing, rendering, charts, export, print */
 (function () {
   'use strict';
+  // App version: shown in the sidebar and on the home page. Keep in step with VERSION in sw.js and ?v= in index.html.
+  const APP_VERSION = '2.6.4';
+  document.querySelectorAll('.app-ver').forEach(e => e.textContent = 'v' + APP_VERSION);
   const TOOLS = window.FL_TOOLS, CATS = window.FL_CATS, ICONS = window.FL_ICONS;
   const $ = (s, el = document) => el.querySelector(s);
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -140,7 +143,7 @@
         </svg>
         <h1>4Finance Lab</h1>
         <p>Interactive tools and calculators for the time value of money, corporate finance, fixed income, derivatives and risk management. Every tool shows its formulas step by step, draws interactive charts, and exports to Excel and PNG.</p>
-        <div class="chips"><span>${TOOLS.length} tools</span><span>Step-by-step formulas</span><span>Excel &amp; PNG export</span><span>Works offline</span><span>by Prof. Periklis Gogas</span></div>
+        <div class="chips"><span>${TOOLS.length} tools</span><span>Step-by-step formulas</span><span>Excel &amp; PNG export</span><span>Works offline</span><span>by Prof. Periklis Gogas</span><span>Version ${APP_VERSION}</span></div>
       </div>`;
     CATS.forEach(c => {
       h += `<div class="home-cat">${esc(c.name)}</div><div class="card-grid">`;

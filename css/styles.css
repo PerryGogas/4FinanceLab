@@ -285,3 +285,5 @@ details.steps[open] > summary::before { content: "\2212"; }
 /* v2.6.1: answer shown inside the empty box */
 .field input.solved::placeholder { color: var(--accent); opacity: 1; font-weight: 700; }
 .field input.solved { border-color: var(--accent); }
+.ver-pill { font-size: .78rem; font-weight: 700; color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 999px; padding: 3px 10px; white-space: nowrap; margin-right: 10px; }
+@media print { .ver-pill { display: none; } }
