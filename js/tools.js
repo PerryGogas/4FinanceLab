@@ -1856,14 +1856,14 @@
   TOOLS.push({
     id: 'annuity', cat: 'tvm', icon: 'annuity', title: 'Annuities & Perpetuities', short: 'Annuities', isNew: true, inputsVersion: 2,
     desc: 'Ordinary annuities, annuities due, growing annuities and perpetuities. Fill in every box but one; the empty one is solved (PV, FV, payment, years or rate).',
-    long: 'Fill in every box except the one you want to find and leave that one empty: it is calculated and shown inside that box. Annuities follow the financial-calculator and Excel sign convention: money you receive is positive, money you pay out is negative; enter 0 for PV or FV when there is none. For a perpetuity enter positive amounts.',
+    long: 'Fill in every box except the one you want to find and leave that one empty: it is calculated and shown inside that box. For a plain annuity just enter positive amounts: the tool works out which way they flow. Use signs (money received +, money paid out −, as in Excel) only when you use PV and FV together, for example a loan with a balloon payment. Enter 0 for PV or FV when there is none.',
     inputs: [
       { id: 'kind', label: 'Cash-flow stream', type: 'seg', value: 'annuity', options: [['annuity', 'Annuity'], ['perp', 'Perpetuity']] },
       { id: 'timing', label: 'Payment timing', type: 'seg', value: 'end', options: [['end', 'End (ordinary)'], ['begin', 'Beginning (due)']] },
       { id: 'n', label: 'Number of years n', unit: 'years', value: 10, optional: true, showIf: v => !isPerp(v) },
       { id: 'r', label: 'Annual interest rate r (nominal, APR)', unit: '%', value: 5, optional: true },
-      { id: 'pv', label: 'Present value PV', unit: '$', value: '', optional: true, hint: 'Annuity: + received today (e.g. a loan), − paid today (e.g. the price of an annuity); 0 if none.' },
-      { id: 'pmt', label: 'Payment per period PMT', unit: '$', value: 1000, optional: true, hint: 'For a growing stream, the first payment. Annuity: + received, − paid.' },
+      { id: 'pv', label: 'Present value PV', unit: '$', value: '', optional: true, hint: 'What the payments are worth today (a loan, the price of an annuity); 0 if none.' },
+      { id: 'pmt', label: 'Payment per period PMT', unit: '$', value: 1000, optional: true, hint: 'For a growing stream, the first payment.' },
       { id: 'fv', label: 'Future value FV', unit: '$', value: 0, optional: true, showIf: v => !isPerp(v), hint: 'Lump sum at the end of the last period (a savings target, a balloon payment); 0 for a plain annuity.' },
       { id: 'm', label: 'Payments (and compounding) per year', type: 'select', value: '1', options: [['1', 'Annual (1)'], ['2', 'Semi-annual (2)'], ['4', 'Quarterly (4)'], ['12', 'Monthly (12)'], ['52', 'Weekly (52)']] },
       { id: 'g', label: 'Payment growth rate g (per year)', unit: '%', value: 0, hint: '0 = level payments. Otherwise each payment is (1 + g/m) times the previous one. A growing perpetuity needs r > g.' }
@@ -1883,7 +1883,21 @@
       if (!perp && s !== 'n' && N > 6000) return { error: 'Please use at most 6,000 payments.' };
       const warnings = [], X = (x, d = 6) => F.plain(x, d), ty = due ? 1 : 0;
       const tName = due ? 'annuity due' : 'ordinary annuity';
-      const phOf = { n: () => num(N / m, 4), r: () => num(i * m * 100, 4), pv: () => num(pv, 2), pmt: () => num(pmt, 2), fv: () => num(fv, 2) };
+      // all amounts positive: the unknown or the single lump sum flows the other way (no minus signs needed)
+      let flip = null;
+      if (!perp) {
+        const given = ['pv', 'pmt', 'fv'].filter(k => k !== s).map(k => ({ pv, pmt, fv })[k]);
+        if (given.every(x => x >= 0) && given.some(x => x > 0)) {
+          if (s === 'pv' || s === 'fv') flip = s;
+          else {
+            const lumps = ['pv', 'fv'].filter(k => ({ pv, fv })[k] > 0);
+            if (lumps.length === 2) return { error: 'PV and FV are both filled in with positive amounts, so the direction of each is not clear. Enter the amounts with signs: money received +, money paid out − (for example a loan with a balloon payment: PV 200,000, FV −50,000).' };
+            if (lumps.length === 1) { flip = lumps[0]; if (flip === 'pv') pv = -pv; else fv = -fv; }
+          }
+        }
+      }
+      const dsp = (k, x) => flip === k ? -x : x;
+      const phOf = { n: () => num(N / m, 4), r: () => num(i * m * 100, 4), pv: () => num(dsp('pv', pv), 2), pmt: () => num(pmt, 2), fv: () => num(dsp('fv', fv), 2) };
 
       /* ---------------- perpetuity (positive amounts) ---------------- */
       if (perp) {
@@ -1972,13 +1986,13 @@
       const r = i * m, ear = Math.expm1(m * Math.log1p(i));
       const pva = annPVF(i, N, gp, due), fva = annFVF(i, N, gp, due), totPay = pmt * sumPay(N, gp), net = pv + totPay + fv;
       const sg = x => x > 0 ? 'received (+)' : x < 0 ? 'paid out (−)' : '';
-      const big = { n: ['Years needed', num(N / m, 4) + ' yrs', N / m, `${num(N, 3)} payments`], r: ['Interest rate (APR)', pct(r, 4), r, `${pct(i, 4)} per period`], pv: ['Present value', money(pv, 2), pv, sg(pv)], pmt: ['Payment per period', money(pmt, 2), pmt, sg(pmt) + (growTxt ? ', first payment' : '')], fv: ['Future value', money(fv, 2), fv, sg(fv)] }[s];
+      const big = { n: ['Years needed', num(N / m, 4) + ' yrs', N / m, `${num(N, 3)} payments`], r: ['Interest rate (APR)', pct(r, 4), r, `${pct(i, 4)} per period`], pv: ['Present value', money(dsp('pv', pv), 2), dsp('pv', pv), flip ? 'value today of the payments' + (fv ? ' and FV' : '') : sg(pv)], pmt: ['Payment per period', money(pmt, 2), pmt, (flip ? '' : sg(pmt)) + (growTxt ? (flip ? 'first payment' : ', first payment') : '')], fv: ['Future value', money(dsp('fv', fv), 2), dsp('fv', fv), flip ? 'what ' + (pv ? 'PV and ' : '') + 'the payments grow to' : sg(fv)] }[s];
       const kpis = [
         { k: big[0], v: big[1], raw: big[2], s: big[3], cls: 'good', big: true },
         { k: 'Payments worth today', v: money(Math.abs(pmt * pva), 2), raw: Math.abs(pmt * pva), s: `PV of the ${growTxt ? 'growing ' : ''}${tName}` },
         { k: 'Payments worth at the end', v: money(Math.abs(pmt * fva), 2), raw: Math.abs(pmt * fva), s: `FV at year ${num(N / m, 2)}` },
         { k: 'Total of payments', v: money(Math.abs(totPay), 2), raw: Math.abs(totPay), s: `${num(N, Number.isInteger(+N.toFixed(6)) ? 0 : 3)} payments, ${m}× a year` },
-        { k: 'Interest', v: money(Math.abs(net), 2), raw: net, s: net > 0 ? 'earned: sum of all cash flows' : net < 0 ? 'paid: sum of all cash flows' : '' },
+        { k: 'Interest', v: money(Math.abs(net), 2), raw: net, s: flip ? 'total interest over the whole period' : net > 0 ? 'earned: sum of all cash flows' : net < 0 ? 'paid: sum of all cash flows' : '' },
         { k: 'Effective annual rate', v: pct(ear, 4), raw: ear, s: `APR ${pct(r, 3)}, ${m}× a year` }
       ];
 
@@ -2017,7 +2031,7 @@
         { h: '1. Rates per period and number of payments', f: ['i = r / m' + (growTxt ? ', &nbsp; g = growth per year / m' : '') + ', &nbsp; N = m · n'], calc: `i = ${pct(r, 4)} / ${m} = ${pct(i, 6)}` + (growTxt ? `,  g = ${num(v.g, 4)}% / ${m} = ${pct(gp, 6)}` : '') + `,  N = ${num(N, 4)}` },
         { h: '2. The time-value equation', f: ['PV · (1 + i)<sup>N</sup> + PMT · FVA + FV = 0', growTxt ? `FVA = [(1 + i)<sup>N</sup> − (1 + g)<sup>N</sup>] / (i − g)${dTxt}` : `FVA = [(1 + i)<sup>N</sup> − 1] / i${dTxt}`],
           calc: `(1 + i)^N = ${num(G(i, N), 8)},  FVA = ${num(fva, 8)},  PVA = FVA / (1 + i)^N = ${num(pva, 8)}\nCheck: ${num(pv, 2)} × ${num(G(i, N), 6)} + ${num(pmt, 2)} × ${num(fva, 6)} + ${num(fv, 2)} = ${num(pv * G(i, N) + pmt * fva + fv, 6)}`,
-          note: 'Signs: money received is positive, money paid out is negative. Dividing by (1 + i)<sup>N</sup> gives the same equation in present-value terms: PV + PMT · PVA + FV · (1 + i)<sup>−N</sup> = 0.' + (due ? ' Annuity due: each payment arrives one period earlier, so the factors are (1 + i) times those of an ordinary annuity.' : '') },
+          note: (flip ? `You entered all amounts as positive, so ${flip.toUpperCase()} is taken as flowing the other way and enters the equation with a minus sign. ` : '') + 'Signs: money received is positive, money paid out is negative. Dividing by (1 + i)<sup>N</sup> gives the same equation in present-value terms: PV + PMT · PVA + FV · (1 + i)<sup>−N</sup> = 0.' + (due ? ' Annuity due: each payment arrives one period earlier, so the factors are (1 + i) times those of an ordinary annuity.' : '') },
         solveStep
       ];
       const ex = growTxt ? null : { pv: `=PV(${X(r)}/${m}, ${X(N, 4)}, ${X(pmt, 2)}, ${X(fv, 2)}, ${ty})`, fv: `=FV(${X(r)}/${m}, ${X(N, 4)}, ${X(pmt, 2)}, ${X(pv, 2)}, ${ty})`, pmt: `=PMT(${X(r)}/${m}, ${X(N, 4)}, ${X(pv, 2)}, ${X(fv, 2)}, ${ty})`, n: `=NPER(${X(r)}/${m}, ${X(pmt, 2)}, ${X(pv, 2)}, ${X(fv, 2)}, ${ty})/${m}`, r: `=${m}*RATE(${X(N, 4)}, ${X(pmt, 2)}, ${X(pv, 2)}, ${X(fv, 2)}, ${ty})` }[s];
