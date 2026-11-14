@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   // App version: shown in the sidebar and on the home page. Keep in step with VERSION in sw.js and ?v= in index.html.
-  const APP_VERSION = '2.6.4';
+  const APP_VERSION = '2.6.5';
   document.querySelectorAll('.app-ver').forEach(e => e.textContent = 'v' + APP_VERSION);
   const TOOLS = window.FL_TOOLS, CATS = window.FL_CATS, ICONS = window.FL_ICONS;
   const $ = (s, el = document) => el.querySelector(s);

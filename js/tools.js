@@ -1856,7 +1856,7 @@
   TOOLS.push({
     id: 'annuity', cat: 'tvm', icon: 'annuity', title: 'Annuities & Perpetuities', short: 'Annuities', isNew: true, inputsVersion: 2,
     desc: 'Ordinary annuities, annuities due, growing annuities and perpetuities. Fill in every box but one; the empty one is solved (PV, FV, payment, years or rate).',
-    long: 'Fill in every box except the one you want to find and leave that one empty: it is calculated and shown inside that box. For a plain annuity just enter positive amounts: the tool works out which way they flow. Use signs (money received +, money paid out −, as in Excel) only when you use PV and FV together, for example a loan with a balloon payment. Enter 0 for PV or FV when there is none.',
+    long: 'Fill in every box except the one you want to find and leave that one empty: it is calculated and shown inside that box. For a plain annuity just enter positive amounts: the tool works out which way they flow. With positive amounts, PV is taken as the value today of the payments and FV (a bond price, a loan with a balloon payment). Use signs (money received +, money paid out −, as in Excel) for other combinations, for example savings that start with a deposit: PV −1,000, PMT −100, FV 15,000. Enter 0 for PV or FV when there is none.',
     inputs: [
       { id: 'kind', label: 'Cash-flow stream', type: 'seg', value: 'annuity', options: [['annuity', 'Annuity'], ['perp', 'Perpetuity']] },
       { id: 'timing', label: 'Payment timing', type: 'seg', value: 'end', options: [['end', 'End (ordinary)'], ['begin', 'Beginning (due)']] },
@@ -1891,8 +1891,9 @@
           if (s === 'pv' || s === 'fv') flip = s;
           else {
             const lumps = ['pv', 'fv'].filter(k => ({ pv, fv })[k] > 0);
-            if (lumps.length === 2) return { error: 'PV and FV are both filled in with positive amounts, so the direction of each is not clear. Enter the amounts with signs: money received +, money paid out − (for example a loan with a balloon payment: PV 200,000, FV −50,000).' };
-            if (lumps.length === 1) { flip = lumps[0]; if (flip === 'pv') pv = -pv; else fv = -fv; }
+            // PV is the value today of everything else (payments and FV), e.g. a bond price or a loan with a balloon payment
+            if (lumps.length === 2 || lumps[0] === 'pv') { flip = 'pv'; pv = -pv; }
+            else if (lumps.length === 1) { flip = 'fv'; fv = -fv; }
           }
         }
       }
