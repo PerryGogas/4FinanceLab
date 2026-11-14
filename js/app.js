@@ -202,7 +202,7 @@
       if (val === null || val === undefined || (typeof val === 'number' && !isFinite(val))) { values[key] = ''; st.missing.push((t.inputs.find(x => x.id === key) || {}).label || key); }
       else values[key] = typeof val === 'number' ? String(+val.toPrecision(12)) : val;
     });
-    store.set('4fl-in-' + t.id, values);
+    store.set(skey(t), values);
     renderInputs(); recompute();
   }
   async function datasetRows() {
@@ -212,12 +212,23 @@
   const files = {};   // uploaded files per tool (kept in memory only)
   const fileOf = (tid, iid) => (files[tid] || {})[iid];
 
+  const skey = t => '4fl-in-' + t.id + (t.inputsVersion ? '@' + t.inputsVersion : '');
+  // number boxes: typed freely, shown with thousands commas when not being edited
+  const isNum = i => !i.type || i.type === 'number';
+  const unfmt = x => String(x ?? '').replace(/[,\s]/g, '');
+  function fmtIn(x, i) {
+    const s = unfmt(x);
+    if (i && i.plain) return s;
+    const m = s.match(/^(-?)(\d*)(\.\d*)?$/);
+    if (!m || (m[2] === '' && !m[3])) return s;
+    return m[1] + (m[2] || '0').replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (m[3] || '');
+  }
   function openTool(t) {
     current = t; markNav(t.id);
     const cat = CATS.find(c => c.id === t.cat);
     $('#crumb').innerHTML = `<span>${esc(cat ? cat.name : '')} /</span> ${esc(t.title)}`;
     document.title = t.title + ' | 4Finance Lab';
-    values = Object.assign(defaults(t), store.get('4fl-in-' + t.id) || {});
+    values = Object.assign(defaults(t), store.get(skey(t)) || {});
     // drop stale keys
     Object.keys(values).forEach(k => { if (!t.inputs.some(i => i.id === k)) delete values[k]; });
 
@@ -239,7 +250,7 @@
         <section class="results" id="results"></section>
       </div>`;
     renderInputs();
-    $('#resetBtn').addEventListener('click', () => { values = defaults(t); store.set('4fl-in-' + t.id, null); renderInputs(); recompute(); });
+    $('#resetBtn').addEventListener('click', () => { values = defaults(t); store.set(skey(t), null); renderInputs(); recompute(); });
     $('#xlsxAll').addEventListener('click', exportAllXlsx);
     $('#printBtn').addEventListener('click', () => window.print());
     recompute();
@@ -273,7 +284,7 @@
         ctl = `<div class="file-row"><label class="btn file-btn">${svg('xlsx')}<span>${f ? 'Replace file' : 'Choose file'}</span><input id="in_${i.id}" type="file" accept="${esc(i.accept || '')}" hidden></label>${i.template ? `<button type="button" class="btn" id="tpl_${i.id}">Template</button>` : ''}${i.datasetButton ? `<button type="button" class="btn" id="ds_${i.id}">Built-in companies</button>` : ''}${i.demo ? `<button type="button" class="btn" id="dm_${i.id}">${esc(i.demo.label)}</button>` : ''}</div>
           <div class="file-status">${f ? `<b>${esc(f.name)}</b> &middot; ${f.rows.length} rows <button type="button" class="reset-link" id="fx_${i.id}">remove</button>` : (i.demo && i.demo.auto ? 'No file loaded: the demo sample is used' : 'No file loaded')}</div>`;
       }
-      else ctl = `<input id="in_${i.id}" type="number" inputmode="decimal" step="${i.step ?? 'any'}" ${i.min !== undefined ? `min="${i.min}"` : ''} ${i.max !== undefined ? `max="${i.max}"` : ''} value="${val ?? ''}">`;
+      else ctl = `<input id="in_${i.id}" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" value="${esc(fmtIn(val, i))}">`;
       h += `<div class="field" data-f="${i.id}">${lab}${ctl}${i.hint ? `<div class="hint">${i.hint}</div>` : ''}</div>`;
     });
     if (t.runButton) h += `<button class="btn primary" id="runBtn" style="justify-content:center;padding:11px">${svg('play')}${esc(t.runButton)}</button>`;
@@ -347,10 +358,16 @@
         el.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
         values[i.id] = b.dataset.v; changed(true);
       });
-      else el.addEventListener('input', () => {
-        values[i.id] = i.type === 'number' || !i.type ? (el.value === '' ? '' : el.value) : el.value;
-        changed(i.type === 'select');
-      });
+      else {
+        el.addEventListener('input', () => {
+          values[i.id] = isNum(i) ? unfmt(el.value) : el.value;
+          changed(i.type === 'select');
+        });
+        if (isNum(i)) {
+          el.addEventListener('focus', () => { if (!el.disabled) el.value = unfmt(el.value); });
+          el.addEventListener('blur', () => { el.value = fmtIn(el.value, i); });
+        }
+      }
     });
     if (t.runButton) $('#runBtn').addEventListener('click', () => recompute());
     applyVisibility();
@@ -371,7 +388,7 @@
 
   let timer = null;
   function changed(structural) {
-    store.set('4fl-in-' + current.id, values);
+    store.set(skey(current), values);
     if (structural) applyVisibility();
     if (current.runButton && !current.liveInputs) return;
     clearTimeout(timer); timer = setTimeout(recompute, 90);
@@ -384,7 +401,7 @@
       if (i.type === 'file') { const f = fileOf(current.id, i.id); v[i.id] = f ? f.rows : null; return; }
       if (i.type === 'company') { v[i.id] = null; return; }
       if (i.type === 'colpick') { if (i.multi) { try { v[i.id] = JSON.parse(raw || '[]'); } catch (e) { v[i.id] = []; } } else v[i.id] = raw || ''; return; }
-      v[i.id] = (i.type === 'select' || i.type === 'seg' || i.type === 'textarea') ? raw : (raw === '' || raw === null || raw === undefined ? NaN : parseFloat(raw));
+      v[i.id] = (i.type === 'select' || i.type === 'seg' || i.type === 'textarea') ? raw : (unfmt(raw) === '' ? NaN : Number(unfmt(raw)));
     });
     return v;
   }
@@ -404,10 +421,27 @@
     if (cst && cst.missing && cst.missing.length) lastResult.warnings = (lastResult.warnings || []).concat('Not available from the data source for ' + cst.d.s + ' (year ending ' + cst.year + '): ' + cst.missing.join(', ') + '. Enter these from the annual report.');
     if (cst) lastResult.warnings = (lastResult.warnings || []).concat('Company data: ' + cst.d.n + ', year ending ' + cst.year + ', amounts in ' + cst.d.c + ' (' + cst.source + '). Check key figures against the annual report before relying on them.');
     // write solved values back into disabled fields
-    if (lastResult.solved) Object.entries(lastResult.solved).forEach(([k, x]) => { const el = $('#in_' + k); if (el) el.value = isFinite(x) ? +x.toFixed(6) : ''; });
+    // write solved values back into disabled fields only (never into a box the user is typing in)
+    if (lastResult.solved) Object.entries(lastResult.solved).forEach(([k, x]) => { const el = $('#in_' + k); if (el && el.disabled) el.value = isFinite(x) ? fmtIn(+x.toFixed(6)) : ''; });
+    // tools that solve for the empty box show the answer inside it as a highlighted placeholder
+    t.inputs.forEach(i => {
+      if (!isNum(i)) return; const el = $('#in_' + i.id); if (!el || el.disabled) return;
+      const ph = lastResult.solvedPh && lastResult.solvedPh[i.id];
+      el.placeholder = ph !== undefined ? ph : (i.placeholder || '');
+      el.classList.toggle('solved', ph !== undefined);
+    });
     renderResults(false);
   }
 
+  // shrink KPI values that do not fit on one line
+  function fitKpis() {
+    document.querySelectorAll('.kpi .v').forEach(el => {
+      el.style.fontSize = '';
+      let fs = parseFloat(getComputedStyle(el).fontSize), n = 0;
+      while (el.scrollWidth > el.clientWidth + 1 && fs > 12 && n++ < 40) { fs -= 1; el.style.fontSize = fs + 'px'; }
+    });
+  }
+  let fitT = null; window.addEventListener('resize', () => { clearTimeout(fitT); fitT = setTimeout(fitKpis, 120); });
   // ---------------- Results rendering ----------------
   function renderResults(themeChanged) {
     const r = lastResult, box = $('#results');
@@ -437,6 +471,7 @@
     const ids = new Set((r.charts || []).map(c => c.id));
     Object.keys(charts).forEach(id => { charts[id].destroy(); delete charts[id]; });
     box.innerHTML = h;
+    fitKpis();
     (r.charts || []).forEach(c => {
       const cfg = c.build(T);
       charts[c.id] = new Chart($('#ch_' + c.id), cfg);

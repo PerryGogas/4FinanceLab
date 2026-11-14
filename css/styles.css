@@ -185,7 +185,8 @@ a { color: var(--accent); }
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
 .kpi { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; box-shadow: var(--shadow); border-top: 3px solid var(--accent); }
 .kpi .k { font-size: .76rem; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .5px; }
-.kpi .v { font-size: 1.45rem; font-weight: 750; margin-top: 2px; font-variant-numeric: tabular-nums; word-break: break-word; }
+.kpi { min-width: 0; }
+.kpi .v { font-size: 1.45rem; font-weight: 750; margin-top: 2px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; }
 .kpi .s { font-size: .78rem; color: var(--muted); margin-top: 2px; }
 .kpi.good { border-top-color: var(--good); background: var(--good-bg); } .kpi.good .v { color: var(--good); }
 .kpi.warn { border-top-color: var(--warn); background: var(--warn-bg); } .kpi.warn .v { color: var(--warn); }
@@ -280,3 +281,7 @@ details.steps[open] > summary::before { content: "\2212"; }
 }
 .chart-wrap img.print-img { display: none; }
 .print-head { display: none; }
+
+/* v2.6.1: answer shown inside the empty box */
+.field input.solved::placeholder { color: var(--accent); opacity: 1; font-weight: 700; }
+.field input.solved { border-color: var(--accent); }
